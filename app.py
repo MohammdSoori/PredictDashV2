@@ -962,7 +962,7 @@ def main_page():
         # We're ensuring row['مدل پیکآپ'] and row['پیش بینی نمایشی'] are integers
         pickup_val = row['مدل پیکآپ']
         display_val = 0
-        color_val = max(0, 330-(pickup_val + display_val))
+        color_val = max(0, 100-(pickup_val + display_val))
         
         c_code = fuzz_color(color_val)
         final_code = union_fuzzy([c_code])
