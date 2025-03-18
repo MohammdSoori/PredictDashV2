@@ -1056,13 +1056,17 @@ def main_page():
     st.write("---")
     st.subheader("ثبت پیش‌بینی شخصی")
 
+    tmol_pw = st.secrets["tmol_passwords"]
+    
+    # 2) Map the Farsi user names to the ASCII keys in secrets:
     user_passwords = {
-        "محمدرضا ایدرم": "1234",
-        "فرشته فرجی":   "1234",
-        "آرش پیریایی":  "1234",
-        "فرزین سوری":   "1234",
-        "احسان همایونی": "1234"
+        "محمدرضا ایدرم": tmol_pw["idrom"],
+        "فرشته فرجی":   tmol_pw["fereshte"],
+        "آرش پیریایی":  tmol_pw["arash"],
+        "فرزین سوری":   tmol_pw["farzin"],
+        "احسان همایونی": tmol_pw["ehsan"]
     }
+
 
     user_column_map = {
         "محمدرضا ایدرم": {
