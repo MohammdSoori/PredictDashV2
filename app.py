@@ -40,14 +40,14 @@ def get_pickup_value_for_day(pivot_df, arrival_date, offset):
     if arrival_date in pivot_df.index:
         try:
             return int(pivot_df.loc[arrival_date, f"pickup{offset}"])
-        except Exception as e:
+        except:
             return 0
     return 0
-# Helper function to compute the average Blank for a given weekday over a given past period.
+
 def compute_avg_for_weekday(input_df, target_weekday, days_interval):
+    """Compute average Blank for a given weekday over a given past period."""
     system_today = datetime.date.today()
     start_date = system_today - datetime.timedelta(days=days_interval)
-    # Filter rows: parsed_input_date between start_date and system_today and matching weekday
     mask = (
         (input_df["parsed_input_date"] >= start_date) &
         (input_df["parsed_input_date"] <= system_today) &
@@ -206,9 +206,8 @@ def convert_farsi_number(num):
         farsi_to_english = str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")
         converted = s.translate(farsi_to_english)
         return int(converted)
-    except Exception as e:
+    except:
         return 1
-
 
 @st.cache_data
 def get_data_from_pickup_sheet():
@@ -236,10 +235,11 @@ def get_data_from_pickup_sheet():
     return df
 
 def build_pickup_pivot(df):
+    ### CHANGE: Avoid inplace fillna to stop the FutureWarning
     df = df[["تاریخ معامله میلادی", "تاریخ ورود میلادی", "تعداد شب"]].copy()
     df["تاریخ معامله میلادی"] = pd.to_datetime(df["تاریخ معامله میلادی"], format="%Y/%m/%d", errors="coerce")
     df["تاریخ ورود میلادی"] = pd.to_datetime(df["تاریخ ورود میلادی"], format="%Y/%m/%d", errors="coerce")
-    df["تعداد شب"].fillna(1, inplace=True)
+    df["تعداد شب"] = df["تعداد شب"].fillna(1)  ### CHANGE!
     df["تعداد شب"] = df["تعداد شب"].apply(lambda x: convert_farsi_number(x))
     
     pivot_list = []
@@ -286,9 +286,14 @@ def predict_pickup_for_shift(arrival_date, pivot_df, shift):
     else:
         model_filename = f"pickup/linear_regression_model_shift_{shift}.pkl"
     
+    # More explicit error logging, so if the model file is missing you'll see it.
     try:
         model = load_pickup_model(model_filename)
-    except FileNotFoundError:
+    except FileNotFoundError as e:
+        st.error(f"[Pickup] Model file not found: {model_filename}")
+        return None
+    except Exception as e:
+        st.error(f"[Pickup] Error loading model {model_filename}: {e}")
         return None
     
     predicted_empty = model.predict(X_features)[0]
@@ -361,32 +366,6 @@ def main_page():
     load_css()
     st.image("tmoble.png", width=180)
 
-    # Inject extra CSS for score boxes styling and hover effects
-    st.markdown(
-        """
-        <style>
-        .score-box {
-            width: 150px;
-            height: 150px;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            border-radius: 12px;
-            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
-            transition: transform 0.3s ease, box-shadow 0.3s ease;
-            margin: auto;
-            font-size: 14px;
-        }
-        .score-box:hover {
-            transform: scale(1.05);
-            box-shadow: 0 8px 16px rgba(0,0,0,0.3);
-        }
-        </style>
-        """,
-        unsafe_allow_html=True
-    )
-
     # Refresh button to clear cached data
     if st.button("به روز رسانی"):
         st.cache_data.clear()
@@ -437,7 +416,7 @@ def main_page():
     else:
         idx_today_output = match_out[0]
 
-    # Model configuration (unchanged)
+    # Model configurations (unchanged from your code)
     best_model_map = {
       "Ashrafi": ["linear_reg","random_forest","random_forest","random_forest","random_forest","random_forest","lasso_reg"],
       "Evin":    ["linear_reg","linear_reg","linear_reg","random_forest","random_forest","random_forest","random_forest"],
@@ -456,6 +435,7 @@ def main_page():
     }
     chain_shift_models = ["linear_reg","xgboost","xgboost","xgboost","linear_reg","xgboost","linear_reg"]
 
+    
     HOTEL_CONFIG = {
        "Ashrafi": {
          "model_prefix": "Ashrafi",
@@ -653,6 +633,7 @@ def main_page():
                 pass
         return total
 
+    # More explicit error-logging so you see if a model file is missing
     def predict_hotel_shift(hotel_name, shift):
         best_model = best_model_map[hotel_name][shift]
         config = HOTEL_CONFIG[hotel_name]
@@ -673,17 +654,27 @@ def main_page():
         try:
             with open(model_path, "rb") as f:
                 loaded_model = pickle.load(f)
-            if best_model in ["holt_winters", "exp_smoothing"]:
-                return forecast_univariate_statsmodels(loaded_model, shift)
-            elif best_model == "moving_avg":
-                return forecast_moving_avg(loaded_model)
-            elif best_model == "ts_decomp_reg":
-                return forecast_ts_decomp_reg(loaded_model, X_today, shift)
-            else:
+        except FileNotFoundError as e:
+            st.error(f"[Hotel {hotel_name}, shift={shift}] Model file not found: {model_path}")
+            return np.nan
+        except Exception as e:
+            st.error(f"[Hotel {hotel_name}, shift={shift}] Error loading model {model_path}: {e}")
+            return np.nan
+        
+        # Now run the model
+        if best_model in ["holt_winters", "exp_smoothing"]:
+            return forecast_univariate_statsmodels(loaded_model, shift)
+        elif best_model == "moving_avg":
+            return forecast_moving_avg(loaded_model)
+        elif best_model == "ts_decomp_reg":
+            return forecast_ts_decomp_reg(loaded_model, X_today, shift)
+        else:
+            try:
                 y_pred = loaded_model.predict(X_today)
                 return float(y_pred[0]) if len(y_pred) > 0 else np.nan
-        except:
-            return np.nan
+            except Exception as e:
+                st.error(f"Prediction error for {model_path}: {e}")
+                return np.nan
 
     def predict_chain_shift(shift):
         bestm = chain_shift_models[shift]
@@ -708,20 +699,30 @@ def main_page():
         row_vals = [feats.get(c, 0.0) for c in chain_cfg["column_order"]]
         X_chain = pd.DataFrame([row_vals], columns=chain_cfg["column_order"])
         mp = f"results/Chain/{bestm}_Chain{shift}.pkl"
+        
         try:
             with open(mp, "rb") as f:
                 loaded_chain = pickle.load(f)
-            if bestm in ["holt_winters", "exp_smoothing"]:
-                return forecast_univariate_statsmodels(loaded_chain, shift)
-            elif bestm == "moving_avg":
-                return forecast_moving_avg(loaded_chain)
-            elif bestm == "ts_decomp_reg":
-                return forecast_ts_decomp_reg(loaded_chain, X_chain, shift)
-            else:
+        except FileNotFoundError as e:
+            st.error(f"[Chain shift={shift}] Model file not found: {mp}")
+            return np.nan
+        except Exception as e:
+            st.error(f"[Chain shift={shift}] Error loading model {mp}: {e}")
+            return np.nan
+        
+        if bestm in ["holt_winters", "exp_smoothing"]:
+            return forecast_univariate_statsmodels(loaded_chain, shift)
+        elif bestm == "moving_avg":
+            return forecast_moving_avg(loaded_chain)
+        elif bestm == "ts_decomp_reg":
+            return forecast_ts_decomp_reg(loaded_chain, X_chain, shift)
+        else:
+            try:
                 ypred = loaded_chain.predict(X_chain)
                 return float(ypred[0]) if len(ypred) > 0 else np.nan
-        except:
-            return np.nan
+            except Exception as e:
+                st.error(f"Prediction error for chain model {mp}: {e}")
+                return np.nan
 
     def get_day_label(shift):
         if shift == 0:
@@ -743,7 +744,9 @@ def main_page():
         hotels_list = list(best_model_map.keys())
         hotel_preds = {h: predict_hotel_shift(h, shift) for h in hotels_list}
         sum_houses = sum(v for v in hotel_preds.values() if not pd.isna(v))
+
         chain_pred = predict_chain_shift(shift)
+
         row_future = idx_today_input + shift
         try:
             future_blank = float(input_df.loc[row_future, "Blank"])
@@ -766,12 +769,15 @@ def main_page():
         whole_chain = min(chain_pred, future_blank)
         robust = 0.5 * (sum_houses + whole_chain)
 
-        arrival_date_for_shift = (datetime.date.today() + datetime.timedelta(days=shift))
+        arrival_date_for_shift = datetime.date.today() + datetime.timedelta(days=shift)
         pickup_pred = predict_pickup_for_shift(arrival_date_for_shift, pickup_pivot_df, shift)
-        if pickup_pred is not None and not np.isnan(pickup_pred):
+        if (pickup_pred is not None) and (not np.isnan(pickup_pred)):
             pickup_pred = int(math.ceil(pickup_pred))
         else:
             pickup_pred = 0
+
+        # final display number
+        displayed_pred = int(min(int(round(robust)), int(round(future_blank)) - uncertain_val))
 
         day_results.append({
             "shift": shift,
@@ -783,25 +789,14 @@ def main_page():
             "پیش‌بینی کلی": int(round(whole_chain)),
             "پیش بینی نهایی": int(round(robust)),
             "مدل پیکآپ": pickup_pred,
-            "پیش بینی نمایشی": int(min(int(round(robust)), int(round(future_blank)) - uncertain_val))
+            "پیش بینی نمایشی": displayed_pred
         })
 
-    # Mapping for fuzzy status gradients
-    gradient_map = {
-        "#4A90E2": "linear-gradient(135deg, #6BB9F0, #4A90E2)",  # blue
-        "#7ED321": "linear-gradient(135deg, #9CD64A, #7ED321)",  # green
-        "#F5A623": "linear-gradient(135deg, #F7C97D, #F5A623)",  # yellow
-        "#D0021B": "linear-gradient(135deg, #E26A6D, #D0021B)",  # red
-        "#D8D8D8": "linear-gradient(135deg, #E0E0E0, #B0B0B0)"   # grey (used in place of black)
-    }
-
-    # Display prediction boxes (first scoreboard)
-# <div>پیش‌بینی پیکاپ: {max(0, row['مدل پیکآپ'] + row['پیش بینی نمایشی'])}</div>
+    # Display prediction boxes
     st.subheader("عدد پیش‌بینی")
     cols = st.columns(4)
     pred_gradient = "linear-gradient(135deg, #FFFFFF, #F0F0F0)"
     for idx, (col, row) in enumerate(zip(cols, day_results)):
-        # Build extra content that is hidden by default
         extra_content = f"""
         <div id="pred-extra-{idx}" class="extra-text">
         <div>خالی فعلی: {row['تعداد خالی فعلی']}</div>
@@ -809,7 +804,6 @@ def main_page():
         </div>
         """
         
-        # Build the full HTML code with inline CSS and JavaScript toggle function
         html_code = f"""
         <html>
         <head>
@@ -821,7 +815,6 @@ def main_page():
             padding: 20px;
             border-radius: 5px;
             text-align: center;
-            font-family: Tahoma, sans-serif;
             width: 100%;
             box-sizing: border-box;
             }}
@@ -833,12 +826,12 @@ def main_page():
         </style>
         <script>
             function togglePredExtra_{idx}() {{
-            var x = document.getElementById("pred-extra-{idx}");
-            if (x.style.display === "none" || x.style.display === "") {{
-                x.style.display = "block";
-            }} else {{
-                x.style.display = "none";
-            }}
+                var x = document.getElementById("pred-extra-{idx}");
+                if (x.style.display === "none" || x.style.display === "") {{
+                    x.style.display = "block";
+                }} else {{
+                    x.style.display = "none";
+                }}
             }}
         </script>
         </head>
@@ -855,41 +848,36 @@ def main_page():
         with col:
             components.html(html_code, height=150, width=200)
 
-
-    # Display fuzzy status boxes (second scoreboard)
-
-
+    # Display fuzzy status boxes
     st.subheader("وضعیت بر اساس نرخ اشغال")
     cols = st.columns(4)
     for idx, (col, row) in enumerate(zip(cols, day_results)):
-        # Determine card date for this shift
-        card_date = system_today + datetime.timedelta(days=row['shift'])
-        target_weekday = card_date.weekday()  # Monday=0, etc.
-        # Use the already available weekday label from your day_results row (or map it if needed)
+        card_date = datetime.date.today() + datetime.timedelta(days=row['shift'])
+        target_weekday = card_date.weekday()
         weekday_label = row["روز هفته"] if "روز هفته" in row else ""
         
-        # Compute averages for the past 30, 90, and 365 days using input_df
         avg_month = int(round(compute_avg_for_weekday(input_df, target_weekday, 30)))
         avg_season = int(round(compute_avg_for_weekday(input_df, target_weekday, 90)))
         avg_year = int(round(compute_avg_for_weekday(input_df, target_weekday, 365)))
         
-        # Build extra text (the averages) – note the formatting with one decimal place.
         extra_text = f"""
           {weekday_label}‌های ماه: {avg_month:.0f}<br>
           {weekday_label}‌های فصل: {avg_season:.0f}<br>
           {weekday_label}‌های سال: {avg_year:.0f}
         """
         
-        # Determine the color gradient and text color from your fuzzy logic
-        colors_list = []
-        colors_list.append(fuzz_color(row["پیش بینی تفکیکی"]))
-        colors_list.append(fuzz_color(row["پیش‌بینی کلی"]))
+        # Make sure these are numeric
+        ptf = row["پیش بینی تفکیکی"]
+        ptk = row["پیش‌بینی کلی"]
+        colors_list = [fuzz_color(ptf), fuzz_color(ptk)]
         final_code = union_fuzzy(colors_list)
         hex_col = color_code_to_hex(final_code)
-        gradient = gradient_map.get(hex_col, f"linear-gradient(135deg, {hex_col}, {hex_col})")
-        text_color = "#333" if final_code in [1, 2] else "#fff"
+        gradient = f"linear-gradient(135deg, {hex_col}, {hex_col})"
+        if hex_col in ["#4A90E2", "#7ED321", "#F5A623"]:
+            text_color = "#333"
+        else:
+            text_color = "#fff"
         
-        # Build HTML with a unique JS toggle function for each card
         html_code = f"""
         <html>
         <head>
@@ -902,7 +890,6 @@ def main_page():
             border-radius: 5px;
             text-align: center;
             font-weight: bold;
-            font-family: Tahoma, sans-serif;
             width: 100%;
             box-sizing: border-box;
             }}
@@ -914,12 +901,12 @@ def main_page():
         </style>
         <script>
             function toggleExtra_{idx}() {{
-            var x = document.getElementById("extra-{idx}");
-            if (x.style.display === "none" || x.style.display === "") {{
-                x.style.display = "block";
-            }} else {{
-                x.style.display = "none";
-            }}
+                var x = document.getElementById("extra-{idx}");
+                if (x.style.display === "none" || x.style.display === "") {{
+                    x.style.display = "block";
+                }} else {{
+                    x.style.display = "none";
+                }}
             }}
         </script>
         </head>
@@ -933,24 +920,19 @@ def main_page():
         </body>
         </html>
         """
-        # Render the card within its column as a fixed-size component
         with col:
             components.html(html_code, height=150, width=200)
 
-
-
+    # Display pickup-based status
     st.subheader("وضعیت بر اساس آمار رزرو")
     cols = st.columns(4)
     for idx, (col, row) in enumerate(zip(cols, day_results)):
-        # Calculate the arrival date based on the shift
-        arrival_date = system_today + datetime.timedelta(days=row['shift'])
-        # Get counts from pickup_pivot_df for offsets 0 to 3 using your helper function
+        arrival_date = datetime.date.today() + datetime.timedelta(days=row['shift'])
         count0 = get_pickup_value_for_day(pickup_pivot_df, arrival_date, 0)
         count1 = get_pickup_value_for_day(pickup_pivot_df, arrival_date, 1)
         count2 = get_pickup_value_for_day(pickup_pivot_df, arrival_date, 2)
         count3 = get_pickup_value_for_day(pickup_pivot_df, arrival_date, 3)
         
-        # Prepare extra content based on the shift value
         if row['shift'] == 0:
             extra_content = f"""
             رزرو همان روز: {count0}<br>
@@ -976,14 +958,21 @@ def main_page():
         else:
             extra_content = ""
         
-        # Determine the card color and gradient (using your existing logic)
-        colors_list = [fuzz_color(max(0, row['مدل پیکآپ'] + row['پیش بینی نمایشی']))]
-        final_code = union_fuzzy(colors_list)
-        hex_col = color_code_to_hex(final_code)
-        gradient = gradient_map.get(hex_col, f"linear-gradient(135deg, {hex_col}, {hex_col})")
-        text_color = "#333" if final_code in [1,2] else "#fff"
+        # Now for the fuzzy color
+        # We're ensuring row['مدل پیکآپ'] and row['پیش بینی نمایشی'] are integers
+        pickup_val = row['مدل پیکآپ']
+        display_val = row['پیش بینی نمایشی']
+        color_val = max(0, pickup_val + display_val)
         
-        # Build HTML with a unique JS toggle function for each card
+        c_code = fuzz_color(color_val)
+        final_code = union_fuzzy([c_code])
+        hex_col = color_code_to_hex(final_code)
+        gradient = f"linear-gradient(135deg, {hex_col}, {hex_col})"
+        if hex_col in ["#4A90E2", "#7ED321", "#F5A623"]:
+            text_color = "#333"
+        else:
+            text_color = "#fff"
+        
         html_code = f"""
         <html>
         <head>
@@ -996,7 +985,6 @@ def main_page():
             border-radius: 5px;
             text-align: center;
             font-weight: bold;
-            font-family: Tahoma, sans-serif;
             width: 100%;
             box-sizing: border-box;
             }}
@@ -1008,12 +996,12 @@ def main_page():
         </style>
         <script>
             function toggleExtra_{idx}() {{
-            var x = document.getElementById("extra-{idx}");
-            if (x.style.display === "none" || x.style.display === "") {{
-                x.style.display = "block";
-            }} else {{
-                x.style.display = "none";
-            }}
+                var x = document.getElementById("extra-{idx}");
+                if (x.style.display === "none" || x.style.display === "") {{
+                    x.style.display = "block";
+                }} else {{
+                    x.style.display = "none";
+                }}
             }}
         </script>
         </head>
@@ -1027,13 +1015,12 @@ def main_page():
         </body>
         </html>
         """
-        # Render the card within its column using a with-block
         with col:
             components.html(html_code, height=150, width=200)
     
+    # Notes
     st.subheader("نکات")
     notes = []
-    label_map = ["امروز", "فردا", "پسفردا", "سه روز بعد"]
     if idx_today_output is not None:
         row_output_today = output_df.loc[idx_today_output]
         def outcol(c):
@@ -1125,7 +1112,7 @@ def main_page():
                 st.session_state.logged_in = True
                 st.session_state.logged_user = chosen_user
                 st.success(f"{chosen_user} خوش آمدید! شما می‌توانید پیش‌بینی خود را ثبت کنید.")
-                pred = st.button("شروع پیش‌بینی")
+                st.button("شروع پیش‌بینی")
             else:
                 st.error("رمز عبور اشتباه است!")
     else:
@@ -1202,6 +1189,7 @@ def main_page():
                     sheet_write.clear()
                     sheet_write.update("A1", data_to_write)
                     st.success("پیش‌بینی شما با موفقیت ثبت شد.")
+
 
 def main():
     st.set_page_config(page_title="داشبورد پیش‌بینی", page_icon="📈", layout="wide")
