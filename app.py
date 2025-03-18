@@ -961,7 +961,7 @@ def main_page():
         # Now for the fuzzy color
         # We're ensuring row['مدل پیکآپ'] and row['پیش بینی نمایشی'] are integers
         pickup_val = row['مدل پیکآپ']
-        display_val = row['پیش بینی نمایشی']
+        display_val = 0
         color_val = max(0, pickup_val + display_val)
         
         c_code = fuzz_color(color_val)
