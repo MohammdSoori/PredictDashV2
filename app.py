@@ -357,7 +357,7 @@ def color_code_to_hex(c):
     elif c == 3:
         return "#D0021B"
     else:
-        return "#D8D8D8"
+        return "#333333"
 
 ##############################################################################
 #                MAIN PAGE: BEST MODELS + AGGREGATION (UI IN FARSI)
