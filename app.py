@@ -234,11 +234,10 @@ def get_data_from_pickup_sheet():
     return df
 
 def build_pickup_pivot(df):
-    ### CHANGE: Avoid inplace fillna to stop the FutureWarning
     df = df[["تاریخ معامله میلادی", "تاریخ ورود میلادی", "تعداد شب"]].copy()
     df["تاریخ معامله میلادی"] = pd.to_datetime(df["تاریخ معامله میلادی"], format="%Y/%m/%d", errors="coerce")
     df["تاریخ ورود میلادی"] = pd.to_datetime(df["تاریخ ورود میلادی"], format="%Y/%m/%d", errors="coerce")
-    df["تعداد شب"] = df["تعداد شب"].fillna(1)  ### CHANGE!
+    df["تعداد شب"] = df["تعداد شب"].fillna(1)
     df["تعداد شب"] = df["تعداد شب"].apply(lambda x: convert_farsi_number(x))
     
     pivot_list = []
@@ -285,7 +284,6 @@ def predict_pickup_for_shift(arrival_date, pivot_df, shift):
     else:
         model_filename = f"Pickup/linear_regression_model_shift_{shift}.pkl"
     
-    # More explicit error logging, so if the model file is missing you'll see it.
     try:
         model = load_pickup_model(model_filename)
     except FileNotFoundError as e:
@@ -415,7 +413,7 @@ def main_page():
     else:
         idx_today_output = match_out[0]
 
-    # Model configurations (unchanged from your code)
+    # Model configurations
     best_model_map = {
       "Ashrafi": ["linear_reg","random_forest","random_forest","random_forest","random_forest","random_forest","lasso_reg"],
       "Evin":    ["linear_reg","linear_reg","linear_reg","random_forest","random_forest","random_forest","random_forest"],
@@ -434,7 +432,6 @@ def main_page():
     }
     chain_shift_models = ["linear_reg","xgboost","xgboost","xgboost","linear_reg","xgboost","linear_reg"]
 
-    
     HOTEL_CONFIG = {
        "Ashrafi": {
          "model_prefix": "Ashrafi",
@@ -632,7 +629,6 @@ def main_page():
                 pass
         return total
 
-    # More explicit error-logging so you see if a model file is missing
     def predict_hotel_shift(hotel_name, shift):
         best_model = best_model_map[hotel_name][shift]
         config = HOTEL_CONFIG[hotel_name]
@@ -660,7 +656,6 @@ def main_page():
             st.error(f"[Hotel {hotel_name}, shift={shift}] Error loading model {model_path}: {e}")
             return np.nan
         
-        # Now run the model
         if best_model in ["holt_winters", "exp_smoothing"]:
             return forecast_univariate_statsmodels(loaded_model, shift)
         elif best_model == "moving_avg":
@@ -733,7 +728,6 @@ def main_page():
         else:
             return "سه روز بعد"
 
-    # Build pickup pivot from separate spreadsheet
     pickup_df = get_data_from_pickup_sheet()
     pickup_pivot_df = build_pickup_pivot(pickup_df)
 
@@ -775,9 +769,9 @@ def main_page():
         else:
             pickup_pred = 0
 
-        # final display number
         displayed_pred = int(min(int(round(robust)), int(round(future_blank)) - uncertain_val))
 
+        # >>>>>>> CRITICAL CHANGE: we store hotel_preds here so the "بحرانی" section can access it <<<<<<<
         day_results.append({
             "shift": shift,
             "label": get_day_label(shift),
@@ -788,7 +782,8 @@ def main_page():
             "پیش‌بینی کلی": int(round(whole_chain)),
             "پیش بینی نهایی": int(round(robust)),
             "مدل پیکآپ": pickup_pred,
-            "پیش بینی نمایشی": displayed_pred
+            "پیش بینی نمایشی": displayed_pred,
+            "hotel_preds": hotel_preds  # <-- THIS is the fix
         })
 
     # Display prediction boxes
@@ -866,7 +861,6 @@ def main_page():
           {weekday_label}‌های سال: {avg_year:.0f}
         """
         
-        # Make sure these are numeric
         ptf = row["پیش بینی تفکیکی"]
         ptk = row["پیش‌بینی کلی"]
         colors_list = [fuzz_color(ptf), fuzz_color(ptk)]
@@ -959,8 +953,6 @@ def main_page():
         else:
             extra_content = ""
         
-        # Now for the fuzzy color
-        # We're ensuring row['مدل پیکآپ'] and row['پیش بینی نمایشی'] are integers
         pickup_val = row['مدل پیکآپ']
         display_val = 0
         color_val = max(0, 100-(pickup_val + display_val))
@@ -1049,17 +1041,56 @@ def main_page():
 
     for n in notes:
         st.write(n)
+    
+    st.write("---")
+    st.subheader("هتل‌های بحرانی بر اساس پیش‌بینی")
+    
+    for day_res in day_results:
+        shift = day_res["shift"]
+        label = day_res["label"]  # e.g. امروز، فردا، پسفردا، ...
+        hotel_preds_for_shift = day_res.get("hotel_preds", {})
+    
+        # Ignore if no predictions are found:
+        if not hotel_preds_for_shift:
+            continue
+    
+        max_predicted_empty = max(hotel_preds_for_shift.values())
+        worst_hotels = [h for h, val in hotel_preds_for_shift.items() if val == max_predicted_empty]
+    
+        row_future = idx_today_input + shift
+        for wh in worst_hotels:
+            pred_val = hotel_preds_for_shift[wh]
+            if pd.isna(pred_val):
+                continue
+    
+            config = HOTEL_CONFIG.get(wh, {})
+            cols_for_hotel = config.get("lag_cols", [])
+    
+            if (row_future < 0 or row_future >= len(input_df)) or (not cols_for_hotel):
+                current_empties = 0
+            else:
+                current_empties = 0
+                for c in cols_for_hotel:
+                    try:
+                        current_empties += float(input_df.loc[row_future, c])
+                    except:
+                        pass
+    
+            fa_name = hotel_name_map.get(wh, wh)
+            st.write(
+                f"مجموعه {fa_name} با پیش‌بینی {int(round(pred_val))} خالی برای {label}، بحرانی است. "
+                f"تعداد خالی فعلی این مجموعه، {int(round(current_empties))} است."
+            )
 
     ########################################################################
     # PERSONAL PREDICTIONS MODULE
     ########################################################################
 
     st.write("---")
-    st.subheader("ثبت پیش‌بینی شخصی")
+    st.subheader("ثبت پیش‌بینی خبرگان")
 
     tmol_pw = st.secrets["tmol_passwords"]
     
-    # 2) Map the Farsi user names to the ASCII keys in secrets:
     user_passwords = {
         "محمدرضا ایدرم": tmol_pw["idrom"],
         "فرشته فرجی":   tmol_pw["fereshte"],
@@ -1067,7 +1098,6 @@ def main_page():
         "فرزین سوری":   tmol_pw["farzin"],
         "احسان همایونی": tmol_pw["ehsan"]
     }
-
 
     user_column_map = {
         "محمدرضا ایدرم": {
