@@ -771,7 +771,7 @@ def main_page():
         if pickup_pred is not None and not np.isnan(pickup_pred):
             pickup_pred = int(math.ceil(pickup_pred))
         else:
-            pickup_pred = "-"
+            pickup_pred = 0
 
         day_results.append({
             "shift": shift,
