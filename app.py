@@ -961,10 +961,47 @@ def main_page():
         # Now for the fuzzy color
         # We're ensuring row['مدل پیکآپ'] and row['پیش بینی نمایشی'] are integers
         pickup_val = row['مدل پیکآپ']
-        display_val = 0
-        color_val = max(0, pickup_val + display_val)
+        display_val =  row['پیش بینی نمایشی']
+        pickup_val = row['مدل پیکآپ']            # model-based pickup forecast
+        display_val = row['پیش بینی نمایشی']    # your existing final forecast
         
-        c_code = fuzz_color(color_val)
+        # Also read the raw pickup counts from the pivot:
+        # "count0" is the same-day pickup, "count1" from 1 day before, etc.
+        pickup_raw_sum = 330-(count0 + count1 + count2 + count3)
+        
+        # 1) Model-based approach (same as old code: مدل پیکآپ + پیش‌بینی نمایشی)
+        model_based = max(0, pickup_val + display_val)
+        
+        # 2) Additive approach with raw pickup
+        #    e.g., add half of the sum of raw pickup to your base display_val
+        #    (You can pick any formula you like.)
+        additive_approach = max(0, display_val + (0.5 * pickup_raw_sum))
+        
+        # 3) Multiplicative approach with raw pickup
+        #    e.g. multiply by (1 + raw_sum / 50.0)
+        #    or any ratio that suits your domain.
+        if pickup_raw_sum > 0:
+            multiplicative_approach = max(0, display_val * (1 + pickup_raw_sum / 50.0))
+        else:
+            multiplicative_approach = display_val
+        
+        # Now we pass *all three* to fuzz_color
+        color_codes = []
+        for val in [model_based, additive_approach, multiplicative_approach]:
+            c = fuzz_color(val)       # existing function
+            color_codes.append(c)
+        
+        # Combine them into one final color
+        final_code = union_fuzzy(color_codes)
+        hex_col = color_code_to_hex(final_code)
+        gradient = f"linear-gradient(135deg, {hex_col}, {hex_col})"
+        
+        # You can keep the rest of your style logic the same:
+        if hex_col in ["#4A90E2", "#7ED321", "#F5A623"]:
+            text_color = "#333"
+        else:
+            text_color = "#fff"
+
         final_code = union_fuzzy([c_code])
         hex_col = color_code_to_hex(final_code)
         gradient = f"linear-gradient(135deg, {hex_col}, {hex_col})"
