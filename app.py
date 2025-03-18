@@ -1046,30 +1046,28 @@ def main_page():
     
     st.write("---")
     st.subheader("مجموعه‌های بحرانی بر اساس پیش‌بینی")
-    
     for day_res in day_results:
         shift = day_res["shift"]
-        label = day_res["label"]  # e.g. امروز، فردا، پسفردا، ...
+        label = day_res["label"]  # "امروز", "فردا", "پسفردا", "سه روز بعد", ...
         hotel_preds_for_shift = day_res.get("hotel_preds", {})
     
-        # 1) Filter out hotels with predicted empties ≤ 3 or NaN
+        # 1) Filter out hotels with forecast <= 3 empties (treating them as "fine")
         filtered_hotels = [(h, val) for (h, val) in hotel_preds_for_shift.items()
                            if (not pd.isna(val)) and (val > 3)]
     
-        # If nothing left after filtering, skip this day
+        # If none pass the filter, skip this day
         if not filtered_hotels:
             continue
     
-        # 2) Compute total forecast among these hotels
+        # 2) Compute total empties among filtered hotels
         total_empties = sum(val for _, val in filtered_hotels)
         if total_empties <= 0:
-            # If total is zero or negative, skip
             continue
     
-        # 3) Sort hotels by forecast (descending)
+        # 3) Sort hotels descending by empties
         filtered_hotels.sort(key=lambda x: x[1], reverse=True)
     
-        # 4) Keep adding hotels until we reach >= 80% of total empties
+        # 4) Keep adding hotels from top until we cover >= 80% of the empties
         cutoff = 0.8 * total_empties
         cumsum = 0.0
         critical_hotels = []
@@ -1079,21 +1077,22 @@ def main_page():
             if cumsum >= cutoff:
                 break
     
-        # Now we have the hotels that account for ~80% of empties. 
-        # 5) Display them
+        # If no critical hotels remain after that, skip
         if not critical_hotels:
-            # e.g., if the biggest hotel was ≤ 3 empties or we never reached 80% 
             continue
     
-        # Indicate day label
-        st.write(f"**هتل/مجموعه‌های بحرانی برای {label}:**")
+        # Build an HTML container for the entire day's results
+        day_html = f"""
+        <div style='background-color:#f9f9f9;border:1px solid #ccc;border-radius:5px;padding:15px;margin-bottom:20px;'>
+          <h4 style="margin-top:0;">هتل/مجموعه‌های بحرانی برای {label}:</h4>
+          <ul style="text-align: right; list-style: disc; padding-right: 20px;">
+        """
     
         row_future = idx_today_input + shift
         for (wh, pred_val) in critical_hotels:
+            # Sum up actual empties from input_df for that hotel on this day
             config = HOTEL_CONFIG.get(wh, {})
             cols_for_hotel = config.get("lag_cols", [])
-    
-            # Approximate current empties by summing the relevant columns
             if (row_future < 0 or row_future >= len(input_df)) or (not cols_for_hotel):
                 current_empties = 0
             else:
@@ -1105,10 +1104,20 @@ def main_page():
                         pass
     
             fa_name = hotel_name_map.get(wh, wh)
-            st.write(
-                f"مجموعه {fa_name} با پیش‌بینی {int(round(pred_val))} خالی برای {label}، بحرانی است. "
-                f"تعداد خالی فعلی این مجموعه، {int(round(current_empties))} است."
-            )
+            day_html += f"""
+            <li>
+              مجموعه {fa_name} با پیش‌بینی {int(round(pred_val))} خالی برای {label} بحرانی است.
+              تعداد خالی فعلی این مجموعه، {int(round(current_empties))} است.
+            </li>
+            """
+    
+        # Close the ul and the box div
+        day_html += "</ul></div>"
+    
+        # Render the box
+        st.markdown(day_html, unsafe_allow_html=True)
+
+
 
 
     ########################################################################
