@@ -1049,13 +1049,66 @@ def main_page():
 
     for n in notes:
         st.write(n)
+    
+    st.write("---")
+    st.subheader("هتل‌های بحرانی بر اساس پیش‌بینی")
+    
+    for day_res in day_results:
+        shift = day_res["shift"]
+        label = day_res["label"]  # e.g. امروز، فردا، پسفردا، ...
+        hotel_preds_for_shift = day_res.get("hotel_preds", {})
+    
+        # Ignore if no predictions are found:
+        if not hotel_preds_for_shift:
+            continue
+    
+        # Find the maximum predicted empties
+        max_predicted_empty = max(hotel_preds_for_shift.values())
+    
+        # Collect all hotels that share this maximum empties (in case of tie)
+        worst_hotels = [h for h, val in hotel_preds_for_shift.items() if val == max_predicted_empty]
+    
+        # For each 'worst' hotel, retrieve the predicted empties and the actual blank
+        row_future = idx_today_input + shift
+        for wh in worst_hotels:
+            # Predicted empties
+            pred_val = hotel_preds_for_shift[wh]
+            if pd.isna(pred_val):
+                continue  # skip NaN
+    
+            # Approximate current empties for that hotel from input data:
+            # We'll sum up the "lag_cols" for that hotel on the target day.
+            # Because your code references HOTEL_CONFIG[hotel]["lag_cols"] to store
+            # which columns hold the empties for that property in the input sheet.
+            config = HOTEL_CONFIG.get(wh, {})
+            cols_for_hotel = config.get("lag_cols", [])
+    
+            # If row is out of range, or if no columns are found, we just show 0
+            if (row_future < 0 or row_future >= len(input_df)) or (not cols_for_hotel):
+                current_empties = 0
+            else:
+                current_empties = 0
+                for c in cols_for_hotel:
+                    try:
+                        current_empties += float(input_df.loc[row_future, c])
+                    except:
+                        pass
+    
+            # Hotel name in Farsi:
+            fa_name = hotel_name_map.get(wh, wh)
+    
+            # Only show this message if the predicted empties is indeed the "worst" condition,
+            # meaning highest empties = lowest occupancy.
+            # You can add any logic you like to define “critical” beyond “max empties”.
+            st.write(f"مجموعه {fa_name} با پیش‌بینی {int(round(pred_val))} خالی برای {label}، بحرانی است. "
+                     f"تعداد خالی فعلی این مجموعه، {int(round(current_empties))} است.")
 
     ########################################################################
     # PERSONAL PREDICTIONS MODULE
     ########################################################################
 
     st.write("---")
-    st.subheader("ثبت پیش‌بینی شخصی")
+    st.subheader("ثبت پیش‌بینی خبرگان")
 
     tmol_pw = st.secrets["tmol_passwords"]
     
