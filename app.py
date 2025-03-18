@@ -1043,6 +1043,7 @@ def main_page():
             notes.append("سیزده به در")
         if (outcol("IsEarlyEsfand") or outcol("IsLateEsfand") or outcol("IsLastDaysOfTheYear")):
             notes.append("در ماه اسفند هستیم")
+        st.write(outcol("IsNorooz"))
         if outcol("IsNorooz"):
             notes.append("عید نوروز")
 
