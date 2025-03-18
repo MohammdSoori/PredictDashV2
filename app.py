@@ -992,7 +992,7 @@ def main_page():
             color_codes.append(c)
         
         # Combine them into one final color
-        final_code = union_fuzzy(color_codes)
+        final_code = union_fuzzy(multiplicative_approach)
         hex_col = color_code_to_hex(final_code)
         gradient = f"linear-gradient(135deg, {hex_col}, {hex_col})"
         
