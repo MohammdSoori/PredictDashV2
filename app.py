@@ -282,9 +282,9 @@ def predict_pickup_for_shift(arrival_date, pivot_df, shift):
     X_features = feature_row.values.reshape(1, -1)
     
     if shift == 0:
-        model_filename = "pickup/linear_regression_model.pkl"
+        model_filename = "Pickup/linear_regression_model.pkl"
     else:
-        model_filename = f"pickup/linear_regression_model_shift_{shift}.pkl"
+        model_filename = f"Pickup/linear_regression_model_shift_{shift}.pkl"
     
     # More explicit error logging, so if the model file is missing you'll see it.
     try:
