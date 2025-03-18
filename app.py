@@ -1082,7 +1082,7 @@ def main_page():
     
         # Build a text block for st.info with no bullet points:
         # First line: a heading for this day
-        lines = [f"**هتل‌های بحرانی برای {label}:**\n"]
+        lines = [f"**مجموعه‌های بحرانی برای {label}:**\n"]
     
         row_future = idx_today_input + shift
         for (wh, pred_val) in critical_hotels:
