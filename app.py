@@ -1014,16 +1014,16 @@ def main_page():
             components.html(html_code, height=150, width=200)
     
     # Notes
-    st.subheader("نکات")
+    st.subheader("مناسبت‌های فصلی ویژه امروز")
     notes = []
     if idx_today_output is not None:
         row_output_today = output_df.loc[idx_today_output]
         def outcol(c):
             return safe_int(row_output_today.get(c, None))
         if (outcol("IsStartOfRamadhan") or outcol("IsMidRamadhan") or outcol("IsEndOfRamadhan")):
-            notes.append("در ماه رمضان هستیم")
+            notes.append("ماه رمضان")
         if (outcol("IsStartOfMoharam") or outcol("IsMidMoharam") or outcol("IsEndOfMoharam")):
-            notes.append("در ماه محرم هستیم")
+            notes.append("ماه محرم")
         if outcol("IsHoliday"):
             notes.append("تعطیلات رسمی")
         if outcol("IsTasooaAshoora"):
@@ -1037,9 +1037,9 @@ def main_page():
         if outcol("Is13BeDar"):
             notes.append("سیزده به در")
         if (outcol("IsEarlyEsfand") or outcol("IsLateEsfand") or outcol("IsLastDaysOfTheYear")):
-            notes.append("در ماه اسفند هستیم")
+            notes.append("اسفند")
         if outcol("IsNorooz"):
-            notes.append("عید نوروز")
+            notes.append("نوروز")
 
     for n in notes:
         st.write(n)
@@ -1048,17 +1048,17 @@ def main_page():
     st.subheader("مجموعه‌های بحرانی بر اساس پیش‌بینی")
     for day_res in day_results:
         shift = day_res["shift"]
-        label = day_res["label"]  # "امروز", "فردا", "پسفردا", "سه روز بعد", ...
+        label = day_res["label"]  # e.g. "امروز", "فردا", "پسفردا", "سه روز بعد"
         hotel_preds_for_shift = day_res.get("hotel_preds", {})
     
-        # 1) Filter out hotels with forecast ≤ 3 empties (they are "fine")
+        # 1) Filter out hotels with forecast ≤ 3 empties 
         filtered_hotels = [(h, val) for (h, val) in hotel_preds_for_shift.items()
                            if (not pd.isna(val)) and (val > 3)]
         if not filtered_hotels:
-            # No hotel above 3 empties => skip this day
+            # No hotel above 3 empties → skip
             continue
     
-        # 2) Compute total empties among these hotels
+        # 2) Sum total empties among these hotels
         total_empties = sum(val for _, val in filtered_hotels)
         if total_empties <= 0:
             continue
@@ -1066,7 +1066,7 @@ def main_page():
         # 3) Sort descending by empties
         filtered_hotels.sort(key=lambda x: x[1], reverse=True)
     
-        # 4) Keep adding hotels from largest downward until reaching >= 80% of empties
+        # 4) Pareto: accumulate until reaching >= 80% of empties
         cutoff = 0.8 * total_empties
         cumsum = 0.0
         critical_hotels = []
@@ -1077,17 +1077,16 @@ def main_page():
                 break
     
         if not critical_hotels:
-            # Nothing ended up in the top 80%
+            # No one reached the 80% cutoff
             continue
     
-        # Build a list of lines to show in one box
-        lines = []
-        # Title for the day:
-        lines.append(f"**هتل‌های بحرانی برای {label}:**")
+        # Build a text block for st.info with no bullet points:
+        # First line: a heading for this day
+        lines = [f"**هتل‌های بحرانی برای {label}:**\n"]
     
         row_future = idx_today_input + shift
         for (wh, pred_val) in critical_hotels:
-            # Sum the actual empties from input_df for that hotel on this date
+            # Sum actual empties from input_df (the “current empties”)
             config = HOTEL_CONFIG.get(wh, {})
             cols_for_hotel = config.get("lag_cols", [])
             if (row_future < 0 or row_future >= len(input_df)) or not cols_for_hotel:
@@ -1101,23 +1100,17 @@ def main_page():
                         pass
     
             fa_name = hotel_name_map.get(wh, wh)
-            # Add a bullet point describing this hotel
+            # Add a line for this hotel. No bullet/dot, just a line.
             lines.append(
-                f"- مجموعه **{fa_name}** با پیش‌بینی **{int(round(pred_val))}** خالی برای {label} بحرانی است. "
-                f"تعداد خالی فعلی این مجموعه، **{int(round(current_empties))}** است."
+                f"مجموعه **{fa_name}** با پیش‌بینی **{int(round(pred_val))}** خالی برای {label} بحرانی است. "
+                f"تعداد خالی فعلی این مجموعه، **{int(round(current_empties))}** است.\n"
             )
     
-        # Join everything into a single markdown string
+        # Join all lines into one text block
         final_text = "\n".join(lines)
     
-        # Show it in a Streamlit “warning” box (orange background = critical)
-        st.warning(final_text)
-
-
-
-    ########################################################################
-    # PERSONAL PREDICTIONS MODULE
-    ########################################################################
+        # Show it in a Streamlit info box → light‐blue background, dark text
+        st.info(final_text)
 
     st.write("---")
     st.subheader("ثبت پیش‌بینی خبرگان")
