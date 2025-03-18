@@ -131,7 +131,6 @@ def forecast_ts_decomp_reg(ts_tuple, X_today, shift):
 ##############################################################################
 
 def load_css():
-    # Force the font to be Tahoma for everything
     st.markdown(
         """
         <style>
@@ -822,6 +821,7 @@ def main_page():
             display: none;
             margin-top: 10px;
             font-size: 14px;
+            font-family: "Tahoma", sans-serif !important;
             }}
         </style>
         <script>
@@ -897,6 +897,7 @@ def main_page():
             display: none;
             margin-top: 10px;
             font-size: 12px;
+            font-family: "Tahoma", sans-serif !important;
             }}
         </style>
         <script>
@@ -1043,7 +1044,6 @@ def main_page():
             notes.append("سیزده به در")
         if (outcol("IsEarlyEsfand") or outcol("IsLateEsfand") or outcol("IsLastDaysOfTheYear")):
             notes.append("در ماه اسفند هستیم")
-        st.write(outcol("IsNorooz"))
         if outcol("IsNorooz"):
             notes.append("عید نوروز")
 
