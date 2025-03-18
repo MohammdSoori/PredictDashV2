@@ -1043,7 +1043,7 @@ def main_page():
         st.write(n)
     
     st.write("---")
-    st.subheader("هتل‌های بحرانی بر اساس پیش‌بینی")
+    st.subheader("مجموعه‌های بحرانی بر اساس پیش‌بینی")
     
     for day_res in day_results:
         shift = day_res["shift"]
