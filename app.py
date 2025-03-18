@@ -9,6 +9,8 @@ import gspread
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 import streamlit.components.v1 as components
+import zoneinfo  # Available in Python 3.9+
+tehran_tz = zoneinfo.ZoneInfo("Asia/Tehran")
 
 ##############################################################################
 #                   HELPER FUNCTIONS: GOOGLE SHEETS, DATE PARSING, ETC.
@@ -46,7 +48,7 @@ def get_pickup_value_for_day(pivot_df, arrival_date, offset):
 
 def compute_avg_for_weekday(input_df, target_weekday, days_interval):
     """Compute average Blank for a given weekday over a given past period."""
-    system_today = datetime.date.today()
+    system_today = datetime.datetime.now(tehran_tz).date()
     start_date = system_today - datetime.timedelta(days=days_interval)
     mask = (
         (input_df["parsed_input_date"] >= start_date) &
@@ -375,7 +377,7 @@ def main_page():
     if "logged_user" not in st.session_state:
         st.session_state.logged_user = None
 
-    system_today = datetime.date.today()
+    system_today = datetime.datetime.now(tehran_tz).date()
     jalali_today = jdatetime.date.fromgregorian(date=system_today)
     greg_str = system_today.strftime("%Y/%m/%d")
     jalali_str = jalali_today.strftime("%Y/%m/%d")
@@ -762,7 +764,7 @@ def main_page():
         whole_chain = min(chain_pred, future_blank)
         robust = 0.5 * (sum_houses + whole_chain)
 
-        arrival_date_for_shift = datetime.date.today() + datetime.timedelta(days=shift)
+        arrival_date_for_shift = datetime.datetime.now(tehran_tz).date() + datetime.timedelta(days=shift)
         pickup_pred = predict_pickup_for_shift(arrival_date_for_shift, pickup_pivot_df, shift)
         if (pickup_pred is not None) and (not np.isnan(pickup_pred)):
             pickup_pred = int(math.ceil(pickup_pred))
@@ -847,7 +849,7 @@ def main_page():
     st.subheader("وضعیت بر اساس نرخ اشغال")
     cols = st.columns(4)
     for idx, (col, row) in enumerate(zip(cols, day_results)):
-        card_date = datetime.date.today() + datetime.timedelta(days=row['shift'])
+        card_date = datetime.datetime.now(tehran_tz).date() + datetime.timedelta(days=row['shift'])
         target_weekday = card_date.weekday()
         weekday_label = row["روز هفته"] if "روز هفته" in row else ""
         
@@ -922,7 +924,7 @@ def main_page():
     st.subheader("وضعیت بر اساس آمار رزرو")
     cols = st.columns(4)
     for idx, (col, row) in enumerate(zip(cols, day_results)):
-        arrival_date = datetime.date.today() + datetime.timedelta(days=row['shift'])
+        arrival_date = datetime.datetime.now(tehran_tz).date() + datetime.timedelta(days=row['shift'])
         count0 = get_pickup_value_for_day(pickup_pivot_df, arrival_date, 0)
         count1 = get_pickup_value_for_day(pickup_pivot_df, arrival_date, 1)
         count2 = get_pickup_value_for_day(pickup_pivot_df, arrival_date, 2)
