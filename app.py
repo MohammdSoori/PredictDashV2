@@ -1149,8 +1149,10 @@ def main_page():
                 submit_pred_button = st.form_submit_button("ثبت پیش‌بینی‌ها")
                 if submit_pred_button:
                     SCOPES_WRITE = ['https://www.googleapis.com/auth/spreadsheets']
-                    creds_write = service_account.Credentials.from_service_account_file(
-                        "extreme-lattice-452612-s1-2dbb968dbb10.json", scopes=SCOPES_WRITE
+                    service_account_info_write = st.secrets["gcp_service_account"]
+                    creds_write = service_account.Credentials.from_service_account_info(
+                        service_account_info_write,
+                        scopes=SCOPES_WRITE
                     )
                     client_write = gspread.authorize(creds_write)
                     full_cols = [
