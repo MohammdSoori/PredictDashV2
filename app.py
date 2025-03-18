@@ -16,13 +16,20 @@ import streamlit.components.v1 as components
 
 @st.cache_data
 def create_gsheets_connection():
-    """Create a cached connection to Google Sheets (read-only)."""
-    creds = service_account.Credentials.from_service_account_file(
-        "extreme-lattice-452612-s1-2dbb968dbb10.json",
+    """Create a cached connection to Google Sheets (read-only) using Streamlit secrets."""
+    # Get the service account info from Streamlit secrets
+    service_account_info = st.secrets["gcp_service_account"]
+
+    # Create credentials from the info dictionary
+    creds = service_account.Credentials.from_service_account_info(
+        service_account_info,
         scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
     )
+    
+    # Build the Sheets API service
     service = build('sheets', 'v4', credentials=creds)
     return service
+
 def get_pickup_value_for_day(pivot_df, arrival_date, offset):
     """
     Returns the number of reservations (pickup count) for a given arrival_date and offset.
@@ -205,13 +212,25 @@ def convert_farsi_number(num):
 
 @st.cache_data
 def get_data_from_pickup_sheet():
+    """Retrieve data from a Google Sheet (read-only) using credentials from Streamlit secrets."""
     scopes = ['https://www.googleapis.com/auth/spreadsheets.readonly']
-    creds = service_account.Credentials.from_service_account_file(
-        "extreme-lattice-452612-s1-2dbb968dbb10.json", 
+    
+    # Load credentials from Streamlit secrets
+    service_account_info = st.secrets["gcp_service_account"]
+    
+    # Create credentials using the info dictionary
+    creds = service_account.Credentials.from_service_account_info(
+        service_account_info, 
         scopes=scopes
     )
+    
+    # Authorize and create a client with gspread
     client = gspread.authorize(creds)
+    
+    # Open the spreadsheet by its key and select the specific worksheet
     sheet = client.open_by_key("1D5ROCnoTKCFBQ8me8wLIri8mlaOUF4v1hsyC7LXIvAE").worksheet("Sheet1")
+    
+    # Retrieve all records and convert them into a DataFrame
     records = sheet.get_all_records()
     df = pd.DataFrame(records)
     return df
