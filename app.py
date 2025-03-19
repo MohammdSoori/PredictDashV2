@@ -998,8 +998,8 @@ def main_page():
 
     # Attach them to day_results
     for i in range(4):
-        day_results[i]["پیش‌بینی پیشخور تلفیقی"] = pishkhor_telefiqi[i]
-        day_results[i]["پیش‌بینی پیشخور کلی"]   = pishkhor_chain_vals[i]
+        day_results[i]["پیش‌بینی پیشخور تلفیقی"] = int(round(pishkhor_telefiqi[i]))
+        day_results[i]["پیش‌بینی پیشخور کلی"]   = int(round(pishkhor_chain_vals[i]))
 
     # ---------------------------------------------------------------------
     # (3) Display normal UI
