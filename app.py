@@ -1000,6 +1000,33 @@ def main_page():
     for i in range(4):
         day_results[i]["پیش‌بینی پیشخور تلفیقی"] = int(round(pishkhor_telefiqi[i]))
         day_results[i]["پیش‌بینی پیشخور کلی"]   = int(round(pishkhor_chain_vals[i]))
+        # -----------------------------------------
+    # Add these lines to compute the 3 new keys
+    # -----------------------------------------
+
+    pf_tel = day_results[i]["پیش‌بینی پیشخور تلفیقی"]
+    pf_kli = day_results[i]["پیش‌بینی پیشخور کلی"]
+    pn     = day_results[i]["پیش بینی نمایشی"]
+    cur    = day_results[i]["تعداد خالی فعلی"]
+
+    # 1) پیش‌بینی نهایی خوشبینانه
+    day_results[i]["پیش‌بینی نهایی خوشبینانه"] = int(round(min(
+        cur,
+        min(pf_tel, pf_kli, pn)))
+    )
+
+    # 2) پیش‌بینی نهایی بدبینانه
+    day_results[i]["پیش‌بینی نهایی بدبینانه"] = int(round(min(
+        cur,
+        max(pf_tel, pf_kli, pn)))
+    )
+
+    # 3) پیش‌بینی نهایی واقع‌بینانه
+    avg_val = (pf_tel + pf_kli + pn) / 3
+    day_results[i]["پیش‌بینی نهایی واقع‌بینانه"] = int(round(min(
+        cur,
+        round(avg_val)
+    )))
 
     # ---------------------------------------------------------------------
     # (3) Display normal UI
@@ -1051,7 +1078,7 @@ def main_page():
         <div class="score-box" onclick="togglePredExtra_{idx}()">
             <div><b>{row['label']}</b></div>
             <div><b>{row['روز هفته']}</b></div>
-            <div><b>پیش‌بینی: {row['پیش‌بینی پیشخور تلفیقی']/3+row['پیش‌بینی پیشخور کلی']/3+row['پیش بینی نمایشی']/3}</b></div>
+            <div><b>پیش‌بینی: {row['پیش‌بینی نهایی بدبینانه']}</b></div>
             {extra_content}
         </div>
         </body>
