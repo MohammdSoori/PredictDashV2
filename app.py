@@ -1004,29 +1004,29 @@ def main_page():
     # Add these lines to compute the 3 new keys
     # -----------------------------------------
 
-    pf_tel = day_results[i]["پیش‌بینی پیشخور تلفیقی"]
-    pf_kli = day_results[i]["پیش‌بینی پیشخور کلی"]
-    pn     = day_results[i]["پیش بینی نمایشی"]
-    cur    = day_results[i]["تعداد خالی فعلی"]
-
-    # 1) پیش‌بینی نهایی خوشبینانه
-    day_results[i]["پیش‌بینی نهایی خوشبینانه"] = int(round(min(
-        cur,
-        min(pf_tel, pf_kli, pn)))
-    )
-
-    # 2) پیش‌بینی نهایی بدبینانه
-    day_results[i]["پیش‌بینی نهایی بدبینانه"] = int(round(min(
-        cur,
-        max(pf_tel, pf_kli, pn)))
-    )
-
-    # 3) پیش‌بینی نهایی واقع‌بینانه
-    avg_val = (pf_tel + pf_kli + pn) / 3
-    day_results[i]["پیش‌بینی نهایی واقع‌بینانه"] = int(round(min(
-        cur,
-        round(avg_val)
-    )))
+        pf_tel = day_results[i]["پیش‌بینی پیشخور تلفیقی"]
+        pf_kli = day_results[i]["پیش‌بینی پیشخور کلی"]
+        pn     = day_results[i]["پیش بینی نمایشی"]
+        cur    = day_results[i]["تعداد خالی فعلی"]
+    
+        # 1) پیش‌بینی نهایی خوشبینانه
+        day_results[i]["پیش‌بینی نهایی خوشبینانه"] = int(round(min(
+            cur,
+            min(pf_tel, pf_kli, pn)))
+        )
+    
+        # 2) پیش‌بینی نهایی بدبینانه
+        day_results[i]["پیش‌بینی نهایی بدبینانه"] = int(round(min(
+            cur,
+            max(pf_tel, pf_kli, pn)))
+        )
+    
+        # 3) پیش‌بینی نهایی واقع‌بینانه
+        avg_val = (pf_tel + pf_kli + pn) / 3
+        day_results[i]["پیش‌بینی نهایی واقع‌بینانه"] = int(round(min(
+            cur,
+            round(avg_val)
+        )))
 
     # ---------------------------------------------------------------------
     # (3) Display normal UI
