@@ -567,6 +567,15 @@ def main_page():
         unsafe_allow_html=True
     )
 
+    # (NEW: the small toggle)
+    st.markdown("<div style='text-align: center; margin-bottom: -5px;'><small>نمایش پیش‌بینی بر اساس دیدگاه:</small></div>", unsafe_allow_html=True)
+    prediction_view_option = st.radio(
+        " ",
+        ["خوش‌بینانه", "واقع‌بینانه", "بدبینانه"],
+        index=1,
+        horizontal=True
+    )
+
     # Load main data
     input_df, output_df = read_main_dfs()
     if input_df.empty:
@@ -576,7 +585,6 @@ def main_page():
         st.error("خروجی خالی است.")
         return
 
-    # Find today's row in input
     matches = input_df.index[input_df["parsed_input_date"] == system_today].tolist()
     if not matches:
         st.warning("برای تاریخ امروز سطری در ورودی یافت نشد.")
@@ -588,7 +596,6 @@ def main_page():
     except:
         blank_val_today = 0.0
 
-    # Find today's row in output
     match_out = output_df.index[output_df["parsed_output_date"] == system_today].tolist()
     if not match_out:
         st.warning("سطر منطبق در شیت خروجی برای امروز یافت نشد.")
@@ -596,7 +603,6 @@ def main_page():
     else:
         idx_today_output = match_out[0]
 
-    # Model configurations
     best_model_map = {
       "Ashrafi": ["linear_reg","random_forest","random_forest","random_forest","random_forest","random_forest","lasso_reg"],
       "Evin":    ["linear_reg","linear_reg","linear_reg","random_forest","random_forest","random_forest","random_forest"],
@@ -756,7 +762,8 @@ def main_page():
        }
     }
 
-    # Build holiday flags from the Output row (for normal SHIFT-based prediction)
+    # Build holiday flags, WD_, etc. as always. (Unchanged logic)...
+
     if idx_today_output is not None:
         row_output_today = output_df.loc[idx_today_output]
         def outcol(c):
@@ -812,7 +819,6 @@ def main_page():
                 pass
         return total
 
-    # Normal SHIFT-based predictions (existing approach)
     def predict_hotel_shift(hotel_name, shift):
         best_model = best_model_map[hotel_name][shift]
         config = HOTEL_CONFIG[hotel_name]
@@ -920,15 +926,11 @@ def main_page():
     pickup_df = get_data_from_pickup_sheet()
     pickup_pivot_df = build_pickup_pivot(pickup_df)
 
-    # ---------------------------------------------------------------------
-    # (1) Normal SHIFT-based predictions
-    # ---------------------------------------------------------------------
     day_results = []
     for shift in range(4):
         hotels_list = list(best_model_map.keys())
         hotel_preds = {h: predict_hotel_shift(h, shift) for h in hotels_list}
         sum_houses = sum(v for v in hotel_preds.values() if not pd.isna(v))
-
         chain_pred = predict_chain_shift(shift)
 
         row_future = idx_today_input + shift
@@ -953,7 +955,7 @@ def main_page():
         whole_chain = min(chain_pred, future_blank)
         robust = 0.5 * (sum_houses + whole_chain)
 
-        arrival_date_for_shift = system_today + datetime.timedelta(days=shift)
+        arrival_date_for_shift = datetime.datetime.now(tehran_tz).date() + datetime.timedelta(days=shift)
         pickup_pred = predict_pickup_for_shift(arrival_date_for_shift, pickup_pivot_df, shift)
         if (pickup_pred is not None) and (not np.isnan(pickup_pred)):
             pickup_pred = int(math.ceil(pickup_pred))
@@ -976,13 +978,10 @@ def main_page():
             "hotel_preds": hotel_preds
         })
 
-    # ---------------------------------------------------------------------
-    # (2) Compute "پیش‌بینی پیشخور" for each hotel (day0..3) and sum them
-    # ---------------------------------------------------------------------
     pishkhor_hotels_dict = {}
     for h_ in best_model_map.keys():
         p4 = pishkhor_for_hotel(h_, system_today, input_df, output_df, best_model_map, HOTEL_CONFIG)
-        pishkhor_hotels_dict[h_] = p4  # [d0, d1, d2, d3]
+        pishkhor_hotels_dict[h_] = p4
 
     pishkhor_telefiqi = []
     for i in range(4):
@@ -993,48 +992,38 @@ def main_page():
                 s_ += val_
         pishkhor_telefiqi.append(s_)
 
-    # Chain پیشخور
     pishkhor_chain_vals = pishkhor_for_chain(system_today, input_df, output_df, chain_shift_models)
 
-    # Attach them to day_results
     for i in range(4):
         day_results[i]["پیش‌بینی پیشخور تلفیقی"] = int(round(pishkhor_telefiqi[i]))
         day_results[i]["پیش‌بینی پیشخور کلی"]   = int(round(pishkhor_chain_vals[i]))
-        # -----------------------------------------
-    # Add these lines to compute the 3 new keys
-    # -----------------------------------------
 
         pf_tel = day_results[i]["پیش‌بینی پیشخور تلفیقی"]
         pf_kli = day_results[i]["پیش‌بینی پیشخور کلی"]
         pn     = day_results[i]["پیش بینی نمایشی"]
         cur    = day_results[i]["تعداد خالی فعلی"]
-    
-        # 1) پیش‌بینی نهایی خوشبینانه
-        day_results[i]["پیش‌بینی نهایی خوشبینانه"] = int(round(min(
-            cur,
-            min(pf_tel, pf_kli, pn)))
-        )
-    
-        # 2) پیش‌بینی نهایی بدبینانه
-        day_results[i]["پیش‌بینی نهایی بدبینانه"] = int(round(min(
-            cur,
-            max(pf_tel, pf_kli, pn)))
-        )
-    
-        # 3) پیش‌بینی نهایی واقع‌بینانه
+
+        day_results[i]["پیش‌بینی نهایی خوشبینانه"] = int(round(min(cur, min(pf_tel, pf_kli, pn))))
+        day_results[i]["پیش‌بینی نهایی بدبینانه"] = int(round(min(cur, max(pf_tel, pf_kli, pn))))
         avg_val = (pf_tel + pf_kli + pn) / 3
-        day_results[i]["پیش‌بینی نهایی واقع‌بینانه"] = int(round(min(
-            cur,
-            round(avg_val)
-        )))
+        day_results[i]["پیش‌بینی نهایی واقع‌بینانه"] = int(round(min(cur, round(avg_val))))
 
     # ---------------------------------------------------------------------
-    # (3) Display normal UI
+    # DISPLAY: عدد پیش‌بینی (with toggle)
     # ---------------------------------------------------------------------
     st.subheader("عدد پیش‌بینی")
     cols = st.columns(4)
     pred_gradient = "linear-gradient(135deg, #FFFFFF, #F0F0F0)"
     for idx, (col, row) in enumerate(zip(cols, day_results)):
+
+        # Apply user toggle to select which final prediction to show
+        if prediction_view_option == "خوش‌بینانه":
+            display_val = row["پیش‌بینی نهایی خوشبینانه"]
+        elif prediction_view_option == "بدبینانه":
+            display_val = row["پیش‌بینی نهایی بدبینانه"]
+        else:
+            display_val = row["پیش‌بینی نهایی واقع‌بینانه"]
+
         extra_content = f"""
         <div id="pred-extra-{idx}" class="extra-text">
         <div>خالی فعلی: {row['تعداد خالی فعلی']}</div>
@@ -1078,7 +1067,7 @@ def main_page():
         <div class="score-box" onclick="togglePredExtra_{idx}()">
             <div><b>{row['label']}</b></div>
             <div><b>{row['روز هفته']}</b></div>
-            <div><b>پیش‌بینی: {row['پیش‌بینی نهایی واقع‌بینانه']}</b></div>
+            <div><b>پیش‌بینی: {display_val}</b></div>
             {extra_content}
         </div>
         </body>
@@ -1087,10 +1076,13 @@ def main_page():
         with col:
             components.html(html_code, height=150, width=200)
 
+    # ---------------------------------------------------------------------
+    # DISPLAY: وضعیت بر اساس نرخ اشغال (with toggle)
+    # ---------------------------------------------------------------------
     st.subheader("وضعیت بر اساس نرخ اشغال")
     cols = st.columns(4)
     for idx, (col, row) in enumerate(zip(cols, day_results)):
-        card_date = system_today + datetime.timedelta(days=row['shift'])
+        card_date = datetime.datetime.now(tehran_tz).date() + datetime.timedelta(days=row['shift'])
         target_weekday = card_date.weekday()
         weekday_label = row["روز هفته"] if "روز هفته" in row else ""
         
@@ -1103,18 +1095,20 @@ def main_page():
           {weekday_label}‌های فصل: {avg_season:.0f}<br>
           {weekday_label}‌های سال: {avg_year:.0f}
         """
-        
-        # ptf = row["پیش بینی تفکیکی"]
-        # ptk = row["پیش‌بینی کلی"]
-        pwc = row ['پیش‌بینی نهایی بدبینانه']
+
+        # same toggle for color
+        if prediction_view_option == "خوش‌بینانه":
+            pwc = row["پیش‌بینی نهایی خوشبینانه"]
+        elif prediction_view_option == "بدبینانه":
+            pwc = row["پیش‌بینی نهایی بدبینانه"]
+        else:
+            pwc = row["پیش‌بینی نهایی واقع‌بینانه"]
+
         colors_list = [fuzz_color(pwc)]
         final_code = union_fuzzy(colors_list)
         hex_col = color_code_to_hex(final_code)
         gradient = f"linear-gradient(135deg, {hex_col}, {hex_col})"
-        if hex_col in ["#4A90E2", "#7ED321", "#F5A623"]:
-            text_color = "#333"
-        else:
-            text_color = "#fff"
+        text_color = "#333" if hex_col in ["#4A90E2", "#7ED321", "#F5A623"] else "#fff"
         
         html_code = f"""
         <html>
@@ -1162,10 +1156,11 @@ def main_page():
         with col:
             components.html(html_code, height=150, width=200)
 
+    # (No changes needed for وضعیت بر اساس آمار رزرو)
     st.subheader("وضعیت بر اساس آمار رزرو")
     cols = st.columns(4)
     for idx, (col, row) in enumerate(zip(cols, day_results)):
-        arrival_date = system_today + datetime.timedelta(days=row['shift'])
+        arrival_date = datetime.datetime.now(tehran_tz).date() + datetime.timedelta(days=row['shift'])
         count0 = get_pickup_value_for_day(pickup_pivot_df, arrival_date, 0)
         count1 = get_pickup_value_for_day(pickup_pivot_df, arrival_date, 1)
         count2 = get_pickup_value_for_day(pickup_pivot_df, arrival_date, 2)
@@ -1253,7 +1248,6 @@ def main_page():
         with col:
             components.html(html_code, height=150, width=200)
     
-    # Notes
     st.subheader("مناسبت‌های فصلی ویژه امروز")
     notes = []
     if idx_today_output is not None:
@@ -1343,6 +1337,7 @@ def main_page():
     st.subheader("ثبت پیش‌بینی خبرگان")
 
     tmol_pw = st.secrets["tmol_passwords"]
+    
     user_passwords = {
         "محمدرضا ایدرم": tmol_pw["idrom"],
         "فرشته فرجی":   tmol_pw["fereshte"],
