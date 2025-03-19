@@ -196,7 +196,6 @@ import gspread
 def convert_farsi_number(num):
     try:
         s = str(num).strip()
-        # Check for empty string or common null-like values
         if s == "" or s.lower() in ["nan", "none"]:
             return 1
         farsi_to_english = str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")
@@ -302,7 +301,7 @@ def read_main_dfs():
     input_df["Blank"] = input_df.iloc[:, 2]  # column C
     input_df["parsed_input_date"] = input_df["Date"].apply(parse_input_date_str)
 
-    # Output data (we want holiday flags from here)
+    # Output data
     output_df = read_sheet_values(service, SPREADSHEET_ID, "Output", "A1:ZZ10000")
     output_df["parsed_output_date"] = output_df["Date"].apply(parse_output_date_str)
 
@@ -349,10 +348,9 @@ def color_code_to_hex(c):
 
 def pishkhor_for_hotel(hotel_name, start_date, input_df, output_df, best_model_map, HOTEL_CONFIG):
     """
-    Compute recursive SHIFT=0 forecasts for day0..day3 for a single hotel.
-    We'll produce 4 numeric predictions in a list: [pred0, pred1, pred2, pred3].
+    Compute recursive SHIFT=0 forecasts for day0..day3 for a single hotel,
+    returning [pred0, pred1, pred2, pred3].
     """
-    # SHIFT=0 model name (e.g. best_model_map[hotel_name][0])
     model_tag = best_model_map[hotel_name][0]
     config = HOTEL_CONFIG[hotel_name]
     prefix = config["model_prefix"]
@@ -360,19 +358,15 @@ def pishkhor_for_hotel(hotel_name, start_date, input_df, output_df, best_model_m
     lag_cols = config["lag_cols"]
     model_path = f"results/{prefix}/{model_tag}_{prefix}0.pkl"
 
-    # We'll keep a dictionary of predicted empties for each date
     predicted_cache = {}
 
-    # Helper: build the SHIFT=0 feature vector for a target_date
     def build_shift0_features(target_date):
-        # 1) get output row for holiday flags
         row_match = output_df.index[output_df["parsed_output_date"] == target_date].tolist()
         holiday_feats = {}
         if row_match:
             row_out = output_df.loc[row_match[0]]
             def outcol(c):
                 return safe_int(row_out.get(c, None))
-            # The hotel model DOES have "Esfand_dummy" if it's in final_order, etc.
             holiday_feats["Ramadan_dummy"] = outcol("IsStartOfRamadhan") or outcol("IsMidRamadhan") or outcol("IsEndOfRamadhan")
             holiday_feats["Moharram_dummy"] = outcol("IsStartOfMoharam") or outcol("IsMidMoharam") or outcol("IsEndOfMoharam")
             holiday_feats["Ashoora_dummy"]  = outcol("IsTasooaAshoora")
@@ -380,10 +374,10 @@ def pishkhor_for_hotel(hotel_name, start_date, input_df, output_df, best_model_m
             holiday_feats["Eid_Fetr_dummy"] = outcol("IsFetr")
             holiday_feats["Shabe_Ghadr_dummy"] = outcol("IsShabeGhadr")
             holiday_feats["Sizdah-be-Dar_dummy"] = outcol("Is13BeDar")
-            # Early/late esfand
-            early_esf = outcol("IsEarlyEsfand")
-            late_esf  = outcol("IsLateEsfand")
-            holiday_feats["Esfand_dummy"] = int(early_esf or late_esf)
+
+            eEarly = outcol("IsEarlyEsfand")
+            eLate  = outcol("IsLateEsfand")
+            holiday_feats["Esfand_dummy"] = int(eEarly or eLate)
             holiday_feats["Last 5 Days of Esfand_dummy"] = outcol("IsLastDaysOfTheYear")
             holiday_feats["Norooz_dummy"] = outcol("IsNorooz")
             holiday_feats["Hol_holiday"]  = outcol("Hol_holiday")
@@ -391,23 +385,18 @@ def pishkhor_for_hotel(hotel_name, start_date, input_df, output_df, best_model_m
             holiday_feats["Hol_religious_holiday"] = outcol("Hol_religious_holiday")
             holiday_feats["Yalda_dummy"]  = outcol("Yalda_dummy")
         else:
-            # No row in Output: set all to 0
-            for fcol in ["Ramadan_dummy","Moharram_dummy","Ashoora_dummy","Arbain_dummy",
-                         "Eid_Fetr_dummy","Shabe_Ghadr_dummy","Sizdah-be-Dar_dummy","Esfand_dummy",
-                         "Last 5 Days of Esfand_dummy","Norooz_dummy","Hol_holiday","Hol_none",
-                         "Hol_religious_holiday","Yalda_dummy"]:
+            for fcol in ["Ramadan_dummy","Moharram_dummy","Ashoora_dummy","Arbain_dummy","Eid_Fetr_dummy","Shabe_Ghadr_dummy",
+                         "Sizdah-be-Dar_dummy","Esfand_dummy","Last 5 Days of Esfand_dummy","Norooz_dummy",
+                         "Hol_holiday","Hol_none","Hol_religious_holiday","Yalda_dummy"]:
                 holiday_feats[fcol] = 0
 
-        # 2) day of week features
         wd = target_date.weekday()
         for i in range(7):
             holiday_feats[f"WD_{i}"] = 1 if (i == wd) else 0
 
-        # 3) lag empties
         def get_empties_for_date(d_):
             if d_ in predicted_cache:
                 return predicted_cache[d_]
-            # else read from input
             row_m = input_df.index[input_df["parsed_input_date"] == d_].tolist()
             if not row_m:
                 return 0.0
@@ -424,27 +413,20 @@ def pishkhor_for_hotel(hotel_name, start_date, input_df, output_df, best_model_m
             dlag = target_date - datetime.timedelta(days=lag)
             holiday_feats[f"Lag{lag}_EmptyRooms"] = get_empties_for_date(dlag)
 
-        # Finally: produce row in final_order
         row_vals = [holiday_feats.get(col, 0.0) for col in final_order]
-        X_today = pd.DataFrame([row_vals], columns=final_order)
-        return X_today
+        return pd.DataFrame([row_vals], columns=final_order)
 
-    # Load SHIFT=0 model
     try:
         with open(model_path, "rb") as f:
             loaded_model = pickle.load(f)
     except:
-        # If there's an error, just produce [nan, nan, nan, nan]
         return [np.nan]*4
 
     results_4 = []
-    # For day i in [0..3], we do a step:
     for i in range(4):
-        day_ = start_date + datetime.timedelta(days=i)
-        feats_df = build_shift0_features(day_)
-        # run predict
+        d_ = start_date + datetime.timedelta(days=i)
+        feats_df = build_shift0_features(d_)
         if model_tag in ["holt_winters", "exp_smoothing"]:
-            # just do 1-step
             pred_val = forecast_univariate_statsmodels(loaded_model, 0)
         elif model_tag == "moving_avg":
             pred_val = forecast_moving_avg(loaded_model)
@@ -452,30 +434,26 @@ def pishkhor_for_hotel(hotel_name, start_date, input_df, output_df, best_model_m
             pred_val = forecast_ts_decomp_reg(loaded_model, feats_df, 0)
         else:
             try:
-                pred_val = loaded_model.predict(feats_df)
-                pred_val = float(pred_val[0]) if len(pred_val) > 0 else np.nan
+                pp = loaded_model.predict(feats_df)
+                pred_val = float(pp[0]) if len(pp) > 0 else np.nan
             except:
                 pred_val = np.nan
 
         results_4.append(pred_val)
-        predicted_cache[day_] = pred_val
+        predicted_cache[d_] = pred_val
 
     return results_4
 
 def pishkhor_for_chain(start_date, input_df, output_df, chain_shift_models):
     """
-    Recursive SHIFT=0 for the chain. We'll produce 4 numeric predictions for day0..3.
-    The chain's SHIFT=0 model typically doesn't have "Esfand_dummy", "Arbain_dummy", etc.
-    We'll exactly match the columns in chain_cfg["column_order"] used for shift=0 in the original.
+    Recursive SHIFT=0 for the chain, returning [chain_day0, chain_day1, chain_day2, chain_day3].
     """
-    # chain_cfg for SHIFT=0:
-    bestm0 = chain_shift_models[0]  # e.g. "linear_reg"
-    model_path = f"results/Chain/{bestm0}_Chain0.pkl"
+    bestm0 = chain_shift_models[0]
+    mp = f"results/Chain/{bestm0}_Chain0.pkl"
 
     chain_cfg = {
       "lag_cols": ["Blank"],
       "column_order": [
-        # The original SHIFT=0 chain columns (from the main code, no "Esfand_dummy" etc.)
         "Ramadan_dummy","Ashoora_dummy","Eid_Fetr_dummy","Norooz_dummy",
         "Sizdah-be-Dar_dummy","Yalda_dummy","Last 5 Days of Esfand_dummy",
         "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms",
@@ -486,26 +464,21 @@ def pishkhor_for_chain(start_date, input_df, output_df, chain_shift_models):
       ]
     }
 
-    # load the model
     try:
-        with open(model_path, "rb") as f:
+        with open(mp, "rb") as f:
             loaded_chain = pickle.load(f)
     except:
         return [np.nan]*4
 
-    # We'll store predicted chain empties in a dictionary
-    predicted_chain = {}
+    predicted_cache = {}
 
-    # For each day, build the SHIFT=0 feature row
     def build_chain0_features(tdate):
         feats = {}
-        # read from output_df
         row_match = output_df.index[output_df["parsed_output_date"] == tdate].tolist()
         if row_match:
             row_out = output_df.loc[row_match[0]]
             def outcol(c):
                 return safe_int(row_out.get(c, None))
-            # only fill the columns used in chain_cfg
             feats["Ramadan_dummy"] = outcol("IsStartOfRamadhan") or outcol("IsMidRamadhan") or outcol("IsEndOfRamadhan")
             feats["Ashoora_dummy"] = outcol("IsTasooaAshoora")
             feats["Eid_Fetr_dummy"] = outcol("IsFetr")
@@ -517,57 +490,52 @@ def pishkhor_for_chain(start_date, input_df, output_df, chain_shift_models):
             feats["Hol_none"]      = outcol("Hol_none")
             feats["Hol_religious_holiday"] = outcol("Hol_religious_holiday")
         else:
-            # no row
             for c_ in ["Ramadan_dummy","Ashoora_dummy","Eid_Fetr_dummy","Norooz_dummy",
                        "Sizdah-be-Dar_dummy","Yalda_dummy","Last 5 Days of Esfand_dummy",
                        "Hol_holiday","Hol_none","Hol_religious_holiday"]:
                 feats[c_] = 0
 
-        # day of week
         wd = tdate.weekday()
         for i in range(7):
             feats[f"WD_{i}"] = 1 if (i == wd) else 0
 
-        # now fill lags
-        def get_chain_blank_for_date(dt_):
-            if dt_ in predicted_chain:
-                return predicted_chain[dt_]
-            # otherwise read from input_df
-            rowm = input_df.index[input_df["parsed_input_date"] == dt_].tolist()
-            if not rowm:
+        def get_blank_for_date(dt_):
+            if dt_ in predicted_cache:
+                return predicted_cache[dt_]
+            row_m = input_df.index[input_df["parsed_input_date"] == dt_].tolist()
+            if not row_m:
                 return 0.0
             try:
-                return float(input_df.loc[rowm[0], "Blank"])
+                return float(input_df.loc[row_m[0], "Blank"])
             except:
                 return 0.0
 
         for i in range(1, 11):
             dlag = tdate - datetime.timedelta(days=i)
-            feats[f"Lag{i}_EmptyRooms"] = get_chain_blank_for_date(dlag)
+            feats[f"Lag{i}_EmptyRooms"] = get_blank_for_date(dlag)
 
-        row_vals = [feats.get(col, 0.0) for col in chain_cfg["column_order"]]
+        row_vals = [feats.get(c, 0.0) for c in chain_cfg["column_order"]]
         return pd.DataFrame([row_vals], columns=chain_cfg["column_order"])
 
     results_4 = []
     for i in range(4):
         d_ = start_date + datetime.timedelta(days=i)
         X_chain = build_chain0_features(d_)
-        # predict
         if bestm0 in ["holt_winters", "exp_smoothing"]:
-            pred_val = forecast_univariate_statsmodels(loaded_chain, 0)
+            val = forecast_univariate_statsmodels(loaded_chain, 0)
         elif bestm0 == "moving_avg":
-            pred_val = forecast_moving_avg(loaded_chain)
+            val = forecast_moving_avg(loaded_chain)
         elif bestm0 == "ts_decomp_reg":
-            pred_val = forecast_ts_decomp_reg(loaded_chain, X_chain, 0)
+            val = forecast_ts_decomp_reg(loaded_chain, X_chain, 0)
         else:
             try:
-                pp = loaded_chain.predict(X_chain)
-                pred_val = float(pp[0]) if len(pp) > 0 else np.nan
+                pred_ = loaded_chain.predict(X_chain)
+                val = float(pred_[0]) if len(pred_) > 0 else np.nan
             except:
-                pred_val = np.nan
+                val = np.nan
 
-        results_4.append(pred_val)
-        predicted_chain[d_] = pred_val
+        results_4.append(val)
+        predicted_cache[d_] = val
 
     return results_4
 
@@ -887,7 +855,6 @@ def main_page():
                 return np.nan
 
     def predict_chain_shift(shift):
-        # Original chain shift approach
         bestm = chain_shift_models[shift]
         chain_cfg = {
           "lag_cols": ["Blank"],
@@ -903,10 +870,6 @@ def main_page():
         }
         feats = {}
         feats.update(WD_)
-        # Only add holiday_map keys that actually appear in chain_cfg["column_order"]
-        # e.g. "Ramadan_dummy","Ashoora_dummy","Eid_Fetr_dummy","Norooz_dummy",
-        # "Sizdah-be-Dar_dummy","Yalda_dummy","Last 5 Days of Esfand_dummy",
-        # "Hol_holiday","Hol_none","Hol_religious_holiday"
         for c_ in chain_cfg["column_order"]:
             if c_ in holiday_map:
                 feats[c_] = holiday_map[c_]
@@ -958,7 +921,7 @@ def main_page():
     pickup_pivot_df = build_pickup_pivot(pickup_df)
 
     # ---------------------------------------------------------------------
-    # 1) Normal SHIFT-based predictions
+    # (1) Normal SHIFT-based predictions
     # ---------------------------------------------------------------------
     day_results = []
     for shift in range(4):
@@ -1011,19 +974,16 @@ def main_page():
             "مدل پیکآپ": pickup_pred,
             "پیش بینی نمایشی": displayed_pred,
             "hotel_preds": hotel_preds
-            # We'll add the پیش‌بینی پیشخور تلفیقی / کلی below
         })
 
     # ---------------------------------------------------------------------
-    # 2) Compute "پیش‌بینی پیشخور" for each hotel (day0..3) and sum
+    # (2) Compute "پیش‌بینی پیشخور" for each hotel (day0..3) and sum them
     # ---------------------------------------------------------------------
     pishkhor_hotels_dict = {}
     for h_ in best_model_map.keys():
-        # returns [day0, day1, day2, day3]
-        arr = pishkhor_for_hotel(h_, system_today, input_df, output_df, best_model_map, HOTEL_CONFIG)
-        pishkhor_hotels_dict[h_] = arr
+        p4 = pishkhor_for_hotel(h_, system_today, input_df, output_df, best_model_map, HOTEL_CONFIG)
+        pishkhor_hotels_dict[h_] = p4  # [d0, d1, d2, d3]
 
-    # تلفیقی = sum across hotels
     pishkhor_telefiqi = []
     for i in range(4):
         s_ = 0.0
@@ -1036,13 +996,13 @@ def main_page():
     # Chain پیشخور
     pishkhor_chain_vals = pishkhor_for_chain(system_today, input_df, output_df, chain_shift_models)
 
-    # Attach to day_results
+    # Attach them to day_results
     for i in range(4):
         day_results[i]["پیش‌بینی پیشخور تلفیقی"] = pishkhor_telefiqi[i]
         day_results[i]["پیش‌بینی پیشخور کلی"]   = pishkhor_chain_vals[i]
 
     # ---------------------------------------------------------------------
-    # Display (original UI code)
+    # (3) Display normal UI
     # ---------------------------------------------------------------------
     st.subheader("عدد پیش‌بینی")
     cols = st.columns(4)
@@ -1300,24 +1260,20 @@ def main_page():
     st.subheader("مجموعه‌های بحرانی بر اساس پیش‌بینی")
     for day_res in day_results:
         shift = day_res["shift"]
-        label = day_res["label"]  # e.g. "امروز", "فردا", "پسفردا", "سه روز بعد"
+        label = day_res["label"]
         hotel_preds_for_shift = day_res.get("hotel_preds", {})
     
-        # 1) Filter out hotels with forecast > 3 empties 
         filtered_hotels = [(h, val) for (h, val) in hotel_preds_for_shift.items()
                            if (not pd.isna(val)) and (val > 3)]
         if not filtered_hotels:
             continue
     
-        # 2) Sum total empties among these hotels
         total_empties = sum(val for _, val in filtered_hotels)
         if total_empties <= 0:
             continue
     
-        # 3) Sort descending by empties
         filtered_hotels.sort(key=lambda x: x[1], reverse=True)
     
-        # 4) Pareto: accumulate until reaching >=80% of empties
         cutoff = 0.8 * total_empties
         cumsum = 0.0
         critical_hotels = []
@@ -1359,7 +1315,6 @@ def main_page():
     st.subheader("ثبت پیش‌بینی خبرگان")
 
     tmol_pw = st.secrets["tmol_passwords"]
-    
     user_passwords = {
         "محمدرضا ایدرم": tmol_pw["idrom"],
         "فرشته فرجی":   tmol_pw["fereshte"],
@@ -1493,7 +1448,6 @@ def main_page():
                     sheet_write.clear()
                     sheet_write.update("A1", data_to_write)
                     st.success("پیش‌بینی شما با موفقیت ثبت شد.")
-
 
 def main():
     st.set_page_config(page_title="داشبورد پیش‌بینی", page_icon="📈", layout="wide")
