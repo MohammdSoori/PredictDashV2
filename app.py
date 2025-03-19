@@ -19,23 +19,18 @@ tehran_tz = zoneinfo.ZoneInfo("Asia/Tehran")
 @st.cache_data
 def create_gsheets_connection():
     """Create a cached connection to Google Sheets (read-only) using Streamlit secrets."""
-    # Get the service account info from Streamlit secrets
     service_account_info = st.secrets["gcp_service_account"]
-
-    # Create credentials from the info dictionary
     creds = service_account.Credentials.from_service_account_info(
         service_account_info,
         scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
     )
-    
-    # Build the Sheets API service
     service = build('sheets', 'v4', credentials=creds)
     return service
 
 def get_pickup_value_for_day(pivot_df, arrival_date, offset):
     """
     Returns the number of reservations (pickup count) for a given arrival_date and offset.
-    For example, for offset 4, it returns the count of reservations where
+    For example, for offset=4, it returns the count of reservations where
     'تاریخ ورود میلادی' equals arrival_date and 'تاریخ معامله میلادی'
     equals arrival_date minus 4 days.
     """
@@ -214,23 +209,13 @@ def convert_farsi_number(num):
 def get_data_from_pickup_sheet():
     """Retrieve data from a Google Sheet (read-only) using credentials from Streamlit secrets."""
     scopes = ['https://www.googleapis.com/auth/spreadsheets.readonly']
-    
-    # Load credentials from Streamlit secrets
     service_account_info = st.secrets["gcp_service_account"]
-    
-    # Create credentials using the info dictionary
     creds = service_account.Credentials.from_service_account_info(
         service_account_info, 
         scopes=scopes
     )
-    
-    # Authorize and create a client with gspread
     client = gspread.authorize(creds)
-    
-    # Open the spreadsheet by its key and select the specific worksheet
     sheet = client.open_by_key("1D5ROCnoTKCFBQ8me8wLIri8mlaOUF4v1hsyC7LXIvAE").worksheet("Sheet1")
-    
-    # Retrieve all records and convert them into a DataFrame
     records = sheet.get_all_records()
     df = pd.DataFrame(records)
     return df
@@ -357,6 +342,234 @@ def color_code_to_hex(c):
         return "#D0021B"
     else:
         return "#333333"
+
+##############################################################################
+#                NEW: ADDITIONAL HELPERS FOR "پیش‌بینی پیشخور"
+##############################################################################
+
+def pishkhor_for_hotel(hotel_name, start_date, input_df, output_df, best_model_map, HOTEL_CONFIG):
+    """
+    Compute recursive SHIFT=0 forecasts for day0..day3 for a single hotel.
+    We'll produce 4 numeric predictions in a list: [pred0, pred1, pred2, pred3].
+    """
+    # SHIFT=0 model name (e.g. best_model_map[hotel_name][0])
+    model_tag = best_model_map[hotel_name][0]
+    config = HOTEL_CONFIG[hotel_name]
+    prefix = config["model_prefix"]
+    final_order = config["column_order"]
+    lag_cols = config["lag_cols"]
+    model_path = f"results/{prefix}/{model_tag}_{prefix}0.pkl"
+
+    # We'll keep a dictionary of predicted empties for each date
+    predicted_cache = {}
+
+    # Helper: build the SHIFT=0 feature vector for a target_date
+    def build_shift0_features(target_date):
+        # 1) get output row for holiday flags
+        row_match = output_df.index[output_df["parsed_output_date"] == target_date].tolist()
+        holiday_feats = {}
+        if row_match:
+            row_out = output_df.loc[row_match[0]]
+            def outcol(c):
+                return safe_int(row_out.get(c, None))
+            # The hotel model DOES have "Esfand_dummy" if it's in final_order, etc.
+            holiday_feats["Ramadan_dummy"] = outcol("IsStartOfRamadhan") or outcol("IsMidRamadhan") or outcol("IsEndOfRamadhan")
+            holiday_feats["Moharram_dummy"] = outcol("IsStartOfMoharam") or outcol("IsMidMoharam") or outcol("IsEndOfMoharam")
+            holiday_feats["Ashoora_dummy"]  = outcol("IsTasooaAshoora")
+            holiday_feats["Arbain_dummy"]   = outcol("IsArbain")
+            holiday_feats["Eid_Fetr_dummy"] = outcol("IsFetr")
+            holiday_feats["Shabe_Ghadr_dummy"] = outcol("IsShabeGhadr")
+            holiday_feats["Sizdah-be-Dar_dummy"] = outcol("Is13BeDar")
+            # Early/late esfand
+            early_esf = outcol("IsEarlyEsfand")
+            late_esf  = outcol("IsLateEsfand")
+            holiday_feats["Esfand_dummy"] = int(early_esf or late_esf)
+            holiday_feats["Last 5 Days of Esfand_dummy"] = outcol("IsLastDaysOfTheYear")
+            holiday_feats["Norooz_dummy"] = outcol("IsNorooz")
+            holiday_feats["Hol_holiday"]  = outcol("Hol_holiday")
+            holiday_feats["Hol_none"]     = outcol("Hol_none")
+            holiday_feats["Hol_religious_holiday"] = outcol("Hol_religious_holiday")
+            holiday_feats["Yalda_dummy"]  = outcol("Yalda_dummy")
+        else:
+            # No row in Output: set all to 0
+            for fcol in ["Ramadan_dummy","Moharram_dummy","Ashoora_dummy","Arbain_dummy",
+                         "Eid_Fetr_dummy","Shabe_Ghadr_dummy","Sizdah-be-Dar_dummy","Esfand_dummy",
+                         "Last 5 Days of Esfand_dummy","Norooz_dummy","Hol_holiday","Hol_none",
+                         "Hol_religious_holiday","Yalda_dummy"]:
+                holiday_feats[fcol] = 0
+
+        # 2) day of week features
+        wd = target_date.weekday()
+        for i in range(7):
+            holiday_feats[f"WD_{i}"] = 1 if (i == wd) else 0
+
+        # 3) lag empties
+        def get_empties_for_date(d_):
+            if d_ in predicted_cache:
+                return predicted_cache[d_]
+            # else read from input
+            row_m = input_df.index[input_df["parsed_input_date"] == d_].tolist()
+            if not row_m:
+                return 0.0
+            ridx = row_m[0]
+            total_ = 0.0
+            for c in lag_cols:
+                try:
+                    total_ += float(input_df.loc[ridx, c])
+                except:
+                    pass
+            return total_
+
+        for lag in range(1, 16):
+            dlag = target_date - datetime.timedelta(days=lag)
+            holiday_feats[f"Lag{lag}_EmptyRooms"] = get_empties_for_date(dlag)
+
+        # Finally: produce row in final_order
+        row_vals = [holiday_feats.get(col, 0.0) for col in final_order]
+        X_today = pd.DataFrame([row_vals], columns=final_order)
+        return X_today
+
+    # Load SHIFT=0 model
+    try:
+        with open(model_path, "rb") as f:
+            loaded_model = pickle.load(f)
+    except:
+        # If there's an error, just produce [nan, nan, nan, nan]
+        return [np.nan]*4
+
+    results_4 = []
+    # For day i in [0..3], we do a step:
+    for i in range(4):
+        day_ = start_date + datetime.timedelta(days=i)
+        feats_df = build_shift0_features(day_)
+        # run predict
+        if model_tag in ["holt_winters", "exp_smoothing"]:
+            # just do 1-step
+            pred_val = forecast_univariate_statsmodels(loaded_model, 0)
+        elif model_tag == "moving_avg":
+            pred_val = forecast_moving_avg(loaded_model)
+        elif model_tag == "ts_decomp_reg":
+            pred_val = forecast_ts_decomp_reg(loaded_model, feats_df, 0)
+        else:
+            try:
+                pred_val = loaded_model.predict(feats_df)
+                pred_val = float(pred_val[0]) if len(pred_val) > 0 else np.nan
+            except:
+                pred_val = np.nan
+
+        results_4.append(pred_val)
+        predicted_cache[day_] = pred_val
+
+    return results_4
+
+def pishkhor_for_chain(start_date, input_df, output_df, chain_shift_models):
+    """
+    Recursive SHIFT=0 for the chain. We'll produce 4 numeric predictions for day0..3.
+    The chain's SHIFT=0 model typically doesn't have "Esfand_dummy", "Arbain_dummy", etc.
+    We'll exactly match the columns in chain_cfg["column_order"] used for shift=0 in the original.
+    """
+    # chain_cfg for SHIFT=0:
+    bestm0 = chain_shift_models[0]  # e.g. "linear_reg"
+    model_path = f"results/Chain/{bestm0}_Chain0.pkl"
+
+    chain_cfg = {
+      "lag_cols": ["Blank"],
+      "column_order": [
+        # The original SHIFT=0 chain columns (from the main code, no "Esfand_dummy" etc.)
+        "Ramadan_dummy","Ashoora_dummy","Eid_Fetr_dummy","Norooz_dummy",
+        "Sizdah-be-Dar_dummy","Yalda_dummy","Last 5 Days of Esfand_dummy",
+        "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms",
+        "Lag5_EmptyRooms","Lag6_EmptyRooms","Lag7_EmptyRooms","Lag8_EmptyRooms",
+        "Lag9_EmptyRooms","Lag10_EmptyRooms",
+        "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6",
+        "Hol_holiday","Hol_none","Hol_religious_holiday"
+      ]
+    }
+
+    # load the model
+    try:
+        with open(model_path, "rb") as f:
+            loaded_chain = pickle.load(f)
+    except:
+        return [np.nan]*4
+
+    # We'll store predicted chain empties in a dictionary
+    predicted_chain = {}
+
+    # For each day, build the SHIFT=0 feature row
+    def build_chain0_features(tdate):
+        feats = {}
+        # read from output_df
+        row_match = output_df.index[output_df["parsed_output_date"] == tdate].tolist()
+        if row_match:
+            row_out = output_df.loc[row_match[0]]
+            def outcol(c):
+                return safe_int(row_out.get(c, None))
+            # only fill the columns used in chain_cfg
+            feats["Ramadan_dummy"] = outcol("IsStartOfRamadhan") or outcol("IsMidRamadhan") or outcol("IsEndOfRamadhan")
+            feats["Ashoora_dummy"] = outcol("IsTasooaAshoora")
+            feats["Eid_Fetr_dummy"] = outcol("IsFetr")
+            feats["Norooz_dummy"]  = outcol("IsNorooz")
+            feats["Sizdah-be-Dar_dummy"] = outcol("Is13BeDar")
+            feats["Yalda_dummy"]   = outcol("Yalda_dummy")
+            feats["Last 5 Days of Esfand_dummy"] = outcol("IsLastDaysOfTheYear")
+            feats["Hol_holiday"]   = outcol("Hol_holiday")
+            feats["Hol_none"]      = outcol("Hol_none")
+            feats["Hol_religious_holiday"] = outcol("Hol_religious_holiday")
+        else:
+            # no row
+            for c_ in ["Ramadan_dummy","Ashoora_dummy","Eid_Fetr_dummy","Norooz_dummy",
+                       "Sizdah-be-Dar_dummy","Yalda_dummy","Last 5 Days of Esfand_dummy",
+                       "Hol_holiday","Hol_none","Hol_religious_holiday"]:
+                feats[c_] = 0
+
+        # day of week
+        wd = tdate.weekday()
+        for i in range(7):
+            feats[f"WD_{i}"] = 1 if (i == wd) else 0
+
+        # now fill lags
+        def get_chain_blank_for_date(dt_):
+            if dt_ in predicted_chain:
+                return predicted_chain[dt_]
+            # otherwise read from input_df
+            rowm = input_df.index[input_df["parsed_input_date"] == dt_].tolist()
+            if not rowm:
+                return 0.0
+            try:
+                return float(input_df.loc[rowm[0], "Blank"])
+            except:
+                return 0.0
+
+        for i in range(1, 11):
+            dlag = tdate - datetime.timedelta(days=i)
+            feats[f"Lag{i}_EmptyRooms"] = get_chain_blank_for_date(dlag)
+
+        row_vals = [feats.get(col, 0.0) for col in chain_cfg["column_order"]]
+        return pd.DataFrame([row_vals], columns=chain_cfg["column_order"])
+
+    results_4 = []
+    for i in range(4):
+        d_ = start_date + datetime.timedelta(days=i)
+        X_chain = build_chain0_features(d_)
+        # predict
+        if bestm0 in ["holt_winters", "exp_smoothing"]:
+            pred_val = forecast_univariate_statsmodels(loaded_chain, 0)
+        elif bestm0 == "moving_avg":
+            pred_val = forecast_moving_avg(loaded_chain)
+        elif bestm0 == "ts_decomp_reg":
+            pred_val = forecast_ts_decomp_reg(loaded_chain, X_chain, 0)
+        else:
+            try:
+                pp = loaded_chain.predict(X_chain)
+                pred_val = float(pp[0]) if len(pp) > 0 else np.nan
+            except:
+                pred_val = np.nan
+
+        results_4.append(pred_val)
+        predicted_chain[d_] = pred_val
+
+    return results_4
 
 ##############################################################################
 #                MAIN PAGE: BEST MODELS + AGGREGATION (UI IN FARSI)
@@ -575,7 +788,7 @@ def main_page():
        }
     }
 
-    # Build holiday flags from the Output row
+    # Build holiday flags from the Output row (for normal SHIFT-based prediction)
     if idx_today_output is not None:
         row_output_today = output_df.loc[idx_today_output]
         def outcol(c):
@@ -631,6 +844,7 @@ def main_page():
                 pass
         return total
 
+    # Normal SHIFT-based predictions (existing approach)
     def predict_hotel_shift(hotel_name, shift):
         best_model = best_model_map[hotel_name][shift]
         config = HOTEL_CONFIG[hotel_name]
@@ -673,6 +887,7 @@ def main_page():
                 return np.nan
 
     def predict_chain_shift(shift):
+        # Original chain shift approach
         bestm = chain_shift_models[shift]
         chain_cfg = {
           "lag_cols": ["Blank"],
@@ -687,8 +902,17 @@ def main_page():
           ]
         }
         feats = {}
-        feats.update(holiday_map)
         feats.update(WD_)
+        # Only add holiday_map keys that actually appear in chain_cfg["column_order"]
+        # e.g. "Ramadan_dummy","Ashoora_dummy","Eid_Fetr_dummy","Norooz_dummy",
+        # "Sizdah-be-Dar_dummy","Yalda_dummy","Last 5 Days of Esfand_dummy",
+        # "Hol_holiday","Hol_none","Hol_religious_holiday"
+        for c_ in chain_cfg["column_order"]:
+            if c_ in holiday_map:
+                feats[c_] = holiday_map[c_]
+            else:
+                feats[c_] = 0
+
         for i in range(1, 11):
             row_i = idx_today_input - i
             feats[f"Lag{i}_EmptyRooms"] = sum_cols_for_row(row_i, chain_cfg["lag_cols"])
@@ -733,7 +957,9 @@ def main_page():
     pickup_df = get_data_from_pickup_sheet()
     pickup_pivot_df = build_pickup_pivot(pickup_df)
 
-    # Gather day results for shifts 0..3
+    # ---------------------------------------------------------------------
+    # 1) Normal SHIFT-based predictions
+    # ---------------------------------------------------------------------
     day_results = []
     for shift in range(4):
         hotels_list = list(best_model_map.keys())
@@ -764,7 +990,7 @@ def main_page():
         whole_chain = min(chain_pred, future_blank)
         robust = 0.5 * (sum_houses + whole_chain)
 
-        arrival_date_for_shift = datetime.datetime.now(tehran_tz).date() + datetime.timedelta(days=shift)
+        arrival_date_for_shift = system_today + datetime.timedelta(days=shift)
         pickup_pred = predict_pickup_for_shift(arrival_date_for_shift, pickup_pivot_df, shift)
         if (pickup_pred is not None) and (not np.isnan(pickup_pred)):
             pickup_pred = int(math.ceil(pickup_pred))
@@ -773,7 +999,6 @@ def main_page():
 
         displayed_pred = int(min(int(round(robust)), int(round(future_blank)) - uncertain_val))
 
-        # >>>>>>> CRITICAL CHANGE: we store hotel_preds here so the "بحرانی" section can access it <<<<<<<
         day_results.append({
             "shift": shift,
             "label": get_day_label(shift),
@@ -785,10 +1010,40 @@ def main_page():
             "پیش بینی نهایی": int(round(robust)),
             "مدل پیکآپ": pickup_pred,
             "پیش بینی نمایشی": displayed_pred,
-            "hotel_preds": hotel_preds  # <-- THIS is the fix
+            "hotel_preds": hotel_preds
+            # We'll add the پیش‌بینی پیشخور تلفیقی / کلی below
         })
 
-    # Display prediction boxes
+    # ---------------------------------------------------------------------
+    # 2) Compute "پیش‌بینی پیشخور" for each hotel (day0..3) and sum
+    # ---------------------------------------------------------------------
+    pishkhor_hotels_dict = {}
+    for h_ in best_model_map.keys():
+        # returns [day0, day1, day2, day3]
+        arr = pishkhor_for_hotel(h_, system_today, input_df, output_df, best_model_map, HOTEL_CONFIG)
+        pishkhor_hotels_dict[h_] = arr
+
+    # تلفیقی = sum across hotels
+    pishkhor_telefiqi = []
+    for i in range(4):
+        s_ = 0.0
+        for h_ in best_model_map.keys():
+            val_ = pishkhor_hotels_dict[h_][i]
+            if not pd.isna(val_):
+                s_ += val_
+        pishkhor_telefiqi.append(s_)
+
+    # Chain پیشخور
+    pishkhor_chain_vals = pishkhor_for_chain(system_today, input_df, output_df, chain_shift_models)
+
+    # Attach to day_results
+    for i in range(4):
+        day_results[i]["پیش‌بینی پیشخور تلفیقی"] = pishkhor_telefiqi[i]
+        day_results[i]["پیش‌بینی پیشخور کلی"]   = pishkhor_chain_vals[i]
+
+    # ---------------------------------------------------------------------
+    # Display (original UI code)
+    # ---------------------------------------------------------------------
     st.subheader("عدد پیش‌بینی")
     cols = st.columns(4)
     pred_gradient = "linear-gradient(135deg, #FFFFFF, #F0F0F0)"
@@ -845,11 +1100,10 @@ def main_page():
         with col:
             components.html(html_code, height=150, width=200)
 
-    # Display fuzzy status boxes
     st.subheader("وضعیت بر اساس نرخ اشغال")
     cols = st.columns(4)
     for idx, (col, row) in enumerate(zip(cols, day_results)):
-        card_date = datetime.datetime.now(tehran_tz).date() + datetime.timedelta(days=row['shift'])
+        card_date = system_today + datetime.timedelta(days=row['shift'])
         target_weekday = card_date.weekday()
         weekday_label = row["روز هفته"] if "روز هفته" in row else ""
         
@@ -920,11 +1174,10 @@ def main_page():
         with col:
             components.html(html_code, height=150, width=200)
 
-    # Display pickup-based status
     st.subheader("وضعیت بر اساس آمار رزرو")
     cols = st.columns(4)
     for idx, (col, row) in enumerate(zip(cols, day_results)):
-        arrival_date = datetime.datetime.now(tehran_tz).date() + datetime.timedelta(days=row['shift'])
+        arrival_date = system_today + datetime.timedelta(days=row['shift'])
         count0 = get_pickup_value_for_day(pickup_pivot_df, arrival_date, 0)
         count1 = get_pickup_value_for_day(pickup_pivot_df, arrival_date, 1)
         count2 = get_pickup_value_for_day(pickup_pivot_df, arrival_date, 2)
@@ -956,8 +1209,7 @@ def main_page():
             extra_content = ""
         
         pickup_val = row['مدل پیکآپ']
-        display_val = 0
-        color_val = max(0, 100-(pickup_val + display_val))
+        color_val = max(0, 100-(pickup_val))
         
         c_code = fuzz_color(color_val)
         final_code = union_fuzzy([c_code])
@@ -1051,11 +1303,10 @@ def main_page():
         label = day_res["label"]  # e.g. "امروز", "فردا", "پسفردا", "سه روز بعد"
         hotel_preds_for_shift = day_res.get("hotel_preds", {})
     
-        # 1) Filter out hotels with forecast ≤ 3 empties 
+        # 1) Filter out hotels with forecast > 3 empties 
         filtered_hotels = [(h, val) for (h, val) in hotel_preds_for_shift.items()
                            if (not pd.isna(val)) and (val > 3)]
         if not filtered_hotels:
-            # No hotel above 3 empties → skip
             continue
     
         # 2) Sum total empties among these hotels
@@ -1066,7 +1317,7 @@ def main_page():
         # 3) Sort descending by empties
         filtered_hotels.sort(key=lambda x: x[1], reverse=True)
     
-        # 4) Pareto: accumulate until reaching >= 80% of empties
+        # 4) Pareto: accumulate until reaching >=80% of empties
         cutoff = 0.8 * total_empties
         cumsum = 0.0
         critical_hotels = []
@@ -1077,16 +1328,12 @@ def main_page():
                 break
     
         if not critical_hotels:
-            # No one reached the 80% cutoff
             continue
     
-        # Build a text block for st.info with no bullet points:
-        # First line: a heading for this day
         lines = [f"**مجموعه‌های بحرانی برای {label}:**\n"]
     
         row_future = idx_today_input + shift
         for (wh, pred_val) in critical_hotels:
-            # Sum actual empties from input_df (the “current empties”)
             config = HOTEL_CONFIG.get(wh, {})
             cols_for_hotel = config.get("lag_cols", [])
             if (row_future < 0 or row_future >= len(input_df)) or not cols_for_hotel:
@@ -1100,16 +1347,12 @@ def main_page():
                         pass
     
             fa_name = hotel_name_map.get(wh, wh)
-            # Add a line for this hotel. No bullet/dot, just a line.
             lines.append(
                 f"مجموعه **{fa_name}** با پیش‌بینی **{int(round(pred_val))}** خالی برای {label} بحرانی است. "
                 f"تعداد خالی فعلی این مجموعه، **{int(round(current_empties))}** است.\n"
             )
     
-        # Join all lines into one text block
         final_text = "\n".join(lines)
-    
-        # Show it in a Streamlit info box → light‐blue background, dark text
         st.info(final_text)
 
     st.write("---")
@@ -1203,6 +1446,9 @@ def main_page():
                         scopes=SCOPES_WRITE
                     )
                     client_write = gspread.authorize(creds_write)
+                    second_spreadsheet_id = "1Pz_zyb7DAz6CnvFrqv77uBP2Z_L7OnjOZkW0dj3m3HY"
+                    sheet_write = client_write.open_by_key(second_spreadsheet_id).worksheet("Sheet1")
+                    all_records = sheet_write.get_all_records()
                     full_cols = [
                         "Date",
                         "idrom today", "idrom tomorrow", "idrom 2days", "idrom 3days",
@@ -1217,9 +1463,6 @@ def main_page():
                         "Ehsan today reason", "Ehsan tomorrow reason", "Ehsan 2days reason", "Ehsan 3days reason",
                         "Idrom Time", "Fereshteh Time", "Arash Time", "Farzin Time", "Ehsan Time"
                     ]
-                    second_spreadsheet_id = "1Pz_zyb7DAz6CnvFrqv77uBP2Z_L7OnjOZkW0dj3m3HY"
-                    sheet_write = client_write.open_by_key(second_spreadsheet_id).worksheet("Sheet1")
-                    all_records = sheet_write.get_all_records()
                     df_second = pd.DataFrame(all_records)
                     if df_second.empty:
                         df_second = pd.DataFrame(columns=full_cols)
