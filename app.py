@@ -19,16 +19,11 @@ tehran_tz = zoneinfo.ZoneInfo("Asia/Tehran")
 @st.cache_data
 def create_gsheets_connection():
     """Create a cached connection to Google Sheets (read-only) using Streamlit secrets."""
-    # Get the service account info from Streamlit secrets
     service_account_info = st.secrets["gcp_service_account"]
-
-    # Create credentials from the info dictionary
     creds = service_account.Credentials.from_service_account_info(
         service_account_info,
         scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
     )
-    
-    # Build the Sheets API service
     service = build('sheets', 'v4', credentials=creds)
     return service
 
@@ -94,6 +89,7 @@ def parse_output_date_str(date_str):
         return None
 
 def safe_int(val):
+    """Turns a cell into 0 or 1. Used for holiday flags, etc."""
     if val is None:
         return 0
     return 1 if str(val).strip() == "1" else 0
@@ -196,12 +192,9 @@ hotel_name_map = {
 #               PICKUP MODEL HELPERS (for the "مدل پیکآپ" column)
 ##############################################################################
 
-import gspread
-
 def convert_farsi_number(num):
     try:
         s = str(num).strip()
-        # Check for empty string or common null-like values
         if s == "" or s.lower() in ["nan", "none"]:
             return 1
         farsi_to_english = str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")
@@ -214,23 +207,13 @@ def convert_farsi_number(num):
 def get_data_from_pickup_sheet():
     """Retrieve data from a Google Sheet (read-only) using credentials from Streamlit secrets."""
     scopes = ['https://www.googleapis.com/auth/spreadsheets.readonly']
-    
-    # Load credentials from Streamlit secrets
     service_account_info = st.secrets["gcp_service_account"]
-    
-    # Create credentials using the info dictionary
     creds = service_account.Credentials.from_service_account_info(
         service_account_info, 
         scopes=scopes
     )
-    
-    # Authorize and create a client with gspread
     client = gspread.authorize(creds)
-    
-    # Open the spreadsheet by its key and select the specific worksheet
     sheet = client.open_by_key("1D5ROCnoTKCFBQ8me8wLIri8mlaOUF4v1hsyC7LXIvAE").worksheet("Sheet1")
-    
-    # Retrieve all records and convert them into a DataFrame
     records = sheet.get_all_records()
     df = pd.DataFrame(records)
     return df
@@ -317,7 +300,7 @@ def read_main_dfs():
     input_df["Blank"] = input_df.iloc[:, 2]  # column C
     input_df["parsed_input_date"] = input_df["Date"].apply(parse_input_date_str)
 
-    # Output data (we want holiday flags from here)
+    # Output data
     output_df = read_sheet_values(service, SPREADSHEET_ID, "Output", "A1:ZZ10000")
     output_df["parsed_output_date"] = output_df["Date"].apply(parse_output_date_str)
 
@@ -361,11 +344,629 @@ def color_code_to_hex(c):
 ##############################################################################
 #                MAIN PAGE: BEST MODELS + AGGREGATION (UI IN FARSI)
 ##############################################################################
+
+def load_css():
+    st.markdown(
+        """
+        <style>
+        * {
+            font-family: "Tahoma", sans-serif !important;
+        }
+        body {
+            background-color: #eef2f7;
+            direction: rtl;
+            text-align: center;
+        }
+        .header {
+            background-color: #2c3e50;
+            color: #ecf0f1;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+            font-size: 28px;
+            text-align: center;
+        }
+        .scoreboard {
+            background-color: #ecf0f1;
+            border: 2px solid #34495e;
+            border-radius: 5px;
+            padding: 8px;
+            margin-bottom: 8px;
+            text-align: center;
+            font-size: 16px;
+            font-weight: bold;
+            color: #34495e;
+        }
+        table, th, td {
+            text-align: center !important;
+        }
+        .stTable {
+            font-size: 18px;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
+best_model_map = {
+  "Ashrafi": ["linear_reg","random_forest","random_forest","random_forest","random_forest","random_forest","lasso_reg"],
+  "Evin":    ["linear_reg","linear_reg","linear_reg","random_forest","random_forest","random_forest","random_forest"],
+  "Gandhi":  ["lasso_reg","lasso_reg","holt_winters","holt_winters","holt_winters","holt_winters","holt_winters"],
+  "Jordan":  ["ridge_reg","ridge_reg","lasso_reg","linear_reg","lasso_reg","linear_reg","lasso_reg"],
+  "Keshavarz": ["lasso_reg","random_forest","random_forest","ridge_reg","ridge_reg","ridge_reg","ridge_reg"],
+  "Koroush": ["ridge_reg","lasso_reg","ridge_reg","ridge_reg","random_forest","ridge_reg","ridge_reg"],
+  "Mirdamad": ["poisson_reg","linear_reg","lasso_reg","lasso_reg","lasso_reg","lasso_reg","poisson_reg"],
+  "Niloofar": ["random_forest","ridge_reg","ridge_reg","ridge_reg","ridge_reg","lasso_reg","ridge_reg"],
+  "Nofel":   ["lasso_reg","random_forest","poisson_reg","lasso_reg","poisson_reg","poisson_reg","poisson_reg"],
+  "Parkway": ["ridge_reg","random_forest","lasso_reg","lasso_reg","lasso_reg","lasso_reg","lasso_reg"],
+  "Pasdaran": ["linear_reg","linear_reg","linear_reg","random_forest","lasso_reg","poisson_reg","poisson_reg"],
+  "Toranj":  ["lasso_reg","poisson_reg","poisson_reg","poisson_reg","moving_avg","moving_avg","moving_avg"],
+  "Valiasr": ["linear_reg","linear_reg","linear_reg","linear_reg","linear_reg","linear_reg","random_forest"],
+  "Vila":    ["poisson_reg","lasso_reg","lasso_reg","ridge_reg","ridge_reg","lasso_reg","ridge_reg"]
+}
+
+chain_shift_models = ["linear_reg","xgboost","xgboost","xgboost","linear_reg","xgboost","linear_reg"]
+
+HOTEL_CONFIG = {
+   "Ashrafi": {
+     "model_prefix": "Ashrafi",
+     "lag_cols": ["AshrafiN", "AshrafiS"],
+     "column_order": [
+        "Ramadan_dummy","Moharram_dummy","Eid_Fetr_dummy","Norooz_dummy","Sizdah-be-Dar_dummy",
+        "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms","Lag5_EmptyRooms",
+        "Lag6_EmptyRooms","Lag7_EmptyRooms","Lag8_EmptyRooms","Lag9_EmptyRooms","Lag10_EmptyRooms",
+        "Lag11_EmptyRooms","Lag12_EmptyRooms","WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6"
+     ]
+   },
+   "Evin": {
+     "model_prefix": "Evin",
+     "lag_cols": ["Evin"],
+     "column_order": [
+       "Ramadan_dummy","Shabe_Ghadr_dummy","Norooz_dummy","Sizdah-be-Dar_dummy",
+       "Esfand_dummy","Last 5 Days of Esfand_dummy",
+       "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms","Lag5_EmptyRooms",
+       "Lag6_EmptyRooms","Lag7_EmptyRooms","Lag8_EmptyRooms",
+       "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6"
+     ]
+   },
+   "Gandhi": {
+     "model_prefix": "Gandhi",
+     "lag_cols": ["Ghandi1", "Ghandi2"],
+     "column_order": [
+       "Ramadan_dummy","Moharram_dummy","Shabe_Ghadr_dummy","Eid_Fetr_dummy","Norooz_dummy",
+       "Sizdah-be-Dar_dummy","Yalda_dummy","Last 5 Days of Esfand_dummy",
+       "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms","Lag5_EmptyRooms",
+       "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6"
+     ]
+   },
+   "Jordan": {
+     "model_prefix": "Jordan",
+     "lag_cols": ["JordanN", "JordanS"],
+     "column_order": [
+       "Ramadan_dummy","Moharram_dummy","Eid_Fetr_dummy","Norooz_dummy","Sizdah-be-Dar_dummy",
+       "Esfand_dummy","Last 5 Days of Esfand_dummy",
+       "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms","Lag5_EmptyRooms",
+       "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6"
+     ]
+   },
+   "Keshavarz": {
+     "model_prefix": "Keshavarz",
+     "lag_cols": ["Keshavarz"],
+     "column_order": [
+       "Ramadan_dummy","Eid_Fetr_dummy","Norooz_dummy","Sizdah-be-Dar_dummy","Last 5 Days of Esfand_dummy",
+       "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms","Lag5_EmptyRooms",
+       "Lag6_EmptyRooms","Lag7_EmptyRooms","Lag8_EmptyRooms","Lag9_EmptyRooms",
+       "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6"
+     ]
+   },
+   "Koroush": {
+     "model_prefix": "Kourosh",
+     "lag_cols": ["Kourosh"],
+     "column_order": [
+       "Eid_Fetr_dummy","Sizdah-be-Dar_dummy","Yalda_dummy",
+       "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms","Lag5_EmptyRooms",
+       "Lag6_EmptyRooms","Lag7_EmptyRooms","Lag8_EmptyRooms",
+       "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6",
+       "Hol_holiday","Hol_none","Hol_religious_holiday"
+     ]
+   },
+   "Mirdamad": {
+     "model_prefix": "Mirdamad",
+     "lag_cols": ["Mirdamad1", "Mirdamad2"],
+     "column_order": [
+       "Moharram_dummy","Arbain_dummy","Shabe_Ghadr_dummy","Sizdah-be-Dar_dummy","Esfand_dummy",
+       "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms","Lag5_EmptyRooms",
+       "Lag6_EmptyRooms","Lag7_EmptyRooms","Lag8_EmptyRooms","Lag9_EmptyRooms","Lag10_EmptyRooms",
+       "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6"
+     ]
+   },
+   "Niloofar": {
+     "model_prefix": "Niloofar",
+     "lag_cols": ["NiloofarJacuzi", "Niloofar2R", "Niloofar104"],
+     "column_order": [
+       "Eid_Fetr_dummy",
+       "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms","Lag5_EmptyRooms",
+       "Lag6_EmptyRooms","Lag7_EmptyRooms","Lag8_EmptyRooms","Lag9_EmptyRooms",
+       "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6"
+     ]
+   },
+   "Nofel": {
+     "model_prefix": "Nofel",
+     "lag_cols": ["Nofel1", "Nofel2"],
+     "column_order": [
+       "Ramadan_dummy","Shabe_Ghadr_dummy","Norooz_dummy","Sizdah-be-Dar_dummy",
+       "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms","Lag5_EmptyRooms",
+       "Lag6_EmptyRooms","Lag7_EmptyRooms","Lag8_EmptyRooms","Lag9_EmptyRooms","Lag10_EmptyRooms",
+       "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6"
+     ]
+   },
+   "Parkway": {
+     "model_prefix": "Parkway",
+     "lag_cols": ["Parkway70", "Parkway80", "Parkway105", "Parkway6"],
+     "column_order": [
+       "Ramadan_dummy","Moharram_dummy","Eid_Fetr_dummy","Norooz_dummy","Sizdah-be-Dar_dummy","Yalda_dummy",
+       "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms","Lag5_EmptyRooms","Lag6_EmptyRooms",
+       "Lag7_EmptyRooms","Lag8_EmptyRooms","Lag9_EmptyRooms","Lag10_EmptyRooms","Lag11_EmptyRooms","Lag12_EmptyRooms","Lag13_EmptyRooms",
+       "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6"
+     ]
+   },
+   "Pasdaran": {
+     "model_prefix": "Pasdaran",
+     "lag_cols": ["Pasdaran1", "Pasdaran2"],
+     "column_order": [
+       "Ashoora_dummy","Norooz_dummy","Sizdah-be-Dar_dummy","Last 5 Days of Esfand_dummy",
+       "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms",
+       "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6"
+     ]
+   },
+   "Toranj": {
+     "model_prefix": "Toranj",
+     "lag_cols": ["Toranj"],
+     "column_order": [
+       "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms","Lag5_EmptyRooms",
+       "Lag6_EmptyRooms","Lag7_EmptyRooms","Lag8_EmptyRooms","Lag9_EmptyRooms","Lag10_EmptyRooms","Lag11_EmptyRooms",
+       "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6","Hol_holiday","Hol_none"
+     ]
+   },
+   "Valiasr": {
+     "model_prefix": "Valiasr",
+     "lag_cols": ["ValiasrN", "ValiasrS"],
+     "column_order": [
+       "Ramadan_dummy","Shabe_Ghadr_dummy","Norooz_dummy","Sizdah-be-Dar_dummy","Last 5 Days of Esfand_dummy",
+       "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms",
+       "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6"
+     ]
+   },
+   "Vila": {
+     "model_prefix": "Vila",
+     "lag_cols": ["VilaA", "VilaB"],
+     "column_order": [
+       "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms","Lag5_EmptyRooms",
+       "Lag6_EmptyRooms","Lag7_EmptyRooms","Lag8_EmptyRooms","Lag9_EmptyRooms",
+       "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6","Hol_holiday","Hol_none"
+     ]
+   }
+}
+
+def predict_chain_shift(shift, idx_today_input, input_df, holiday_map, WD_):
+    bestm = chain_shift_models[shift]
+    chain_cfg = {
+      "lag_cols": ["Blank"],
+      "column_order": [
+        "Ramadan_dummy","Ashoora_dummy","Eid_Fetr_dummy","Norooz_dummy",
+        "Sizdah-be-Dar_dummy","Yalda_dummy","Last 5 Days of Esfand_dummy",
+        "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms",
+        "Lag5_EmptyRooms","Lag6_EmptyRooms","Lag7_EmptyRooms","Lag8_EmptyRooms",
+        "Lag9_EmptyRooms","Lag10_EmptyRooms",
+        "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6",
+        "Hol_holiday","Hol_none","Hol_religious_holiday"
+      ]
+    }
+    feats = {}
+    feats.update(holiday_map)
+    feats.update(WD_)
+    def sum_cols_for_row(irow, colnames):
+        if irow < 0 or irow >= len(input_df):
+            return 0.0
+        total = 0.0
+        for c in colnames:
+            try:
+                total += float(input_df.loc[irow, c])
+            except:
+                pass
+        return total
+    for i in range(1, 11):
+        row_i = idx_today_input - i
+        feats[f"Lag{i}_EmptyRooms"] = sum_cols_for_row(row_i, chain_cfg["lag_cols"])
+    row_vals = [feats.get(c, 0.0) for c in chain_cfg["column_order"]]
+    X_chain = pd.DataFrame([row_vals], columns=chain_cfg["column_order"])
+    mp = f"results/Chain/{bestm}_Chain{shift}.pkl"
+    
+    try:
+        with open(mp, "rb") as f:
+            loaded_chain = pickle.load(f)
+    except FileNotFoundError as e:
+        st.error(f"[Chain shift={shift}] Model file not found: {mp}")
+        return np.nan
+    except Exception as e:
+        st.error(f"[Chain shift={shift}] Error loading model {mp}: {e}")
+        return np.nan
+    
+    if bestm in ["holt_winters", "exp_smoothing"]:
+        return forecast_univariate_statsmodels(loaded_chain, shift)
+    elif bestm == "moving_avg":
+        return forecast_moving_avg(loaded_chain)
+    elif bestm == "ts_decomp_reg":
+        return forecast_ts_decomp_reg(loaded_chain, X_chain, shift)
+    else:
+        try:
+            ypred = loaded_chain.predict(X_chain)
+            return float(ypred[0]) if len(ypred) > 0 else np.nan
+        except Exception as e:
+            st.error(f"Prediction error for chain model {mp}: {e}")
+            return np.nan
+
+def predict_hotel_shift(hotel_name, shift, idx_today_input, input_df, holiday_map, WD_):
+    """
+    Standard method using shift-specific models
+    """
+    best_model = best_model_map[hotel_name][shift]
+    config = HOTEL_CONFIG[hotel_name]
+    prefix = config["model_prefix"]
+    final_order = config["column_order"]
+    lag_cols = config["lag_cols"]
+
+    def sum_cols_for_row(irow, colnames):
+        if irow < 0 or irow >= len(input_df):
+            return 0.0
+        total = 0.0
+        for c in colnames:
+            try:
+                total += float(input_df.loc[irow, c])
+            except:
+                pass
+        return total
+
+    feats = {}
+    feats.update(holiday_map)
+    feats.update(WD_)
+
+    for i in range(1, 16):
+        row_i = idx_today_input - i
+        feats[f"Lag{i}_EmptyRooms"] = sum_cols_for_row(row_i, lag_cols)
+
+    row_vals = [feats.get(c, 0.0) for c in final_order]
+    X_today = pd.DataFrame([row_vals], columns=final_order)
+    model_path = f"results/{prefix}/{best_model}_{prefix}{shift}.pkl"
+    try:
+        with open(model_path, "rb") as f:
+            loaded_model = pickle.load(f)
+    except FileNotFoundError as e:
+        st.error(f"[Hotel {hotel_name}, shift={shift}] Model file not found: {model_path}")
+        return np.nan
+    except Exception as e:
+        st.error(f"[Hotel {hotel_name}, shift={shift}] Error loading model {model_path}: {e}")
+        return np.nan
+    
+    if best_model in ["holt_winters", "exp_smoothing"]:
+        return forecast_univariate_statsmodels(loaded_model, shift)
+    elif best_model == "moving_avg":
+        return forecast_moving_avg(loaded_model)
+    elif best_model == "ts_decomp_reg":
+        return forecast_ts_decomp_reg(loaded_model, X_today, shift)
+    else:
+        try:
+            y_pred = loaded_model.predict(X_today)
+            return float(y_pred[0]) if len(y_pred) > 0 else np.nan
+        except Exception as e:
+            st.error(f"Prediction error for {model_path}: {e}")
+            return np.nan
+
+##############################################################################
+#               NEW: پیش‌بینی پیشخور LOGIC
+##############################################################################
+
+def predict_shift0_hotel(hotel_name, target_date, input_df, output_df, pred_future_values):
+    """
+    Predict empties for `target_date` using that hotel's SHIFT=0 model.
+    We fill lag features with real data if the lag day is < target_date and is known,
+    or if the lag day is >= the original "today", we read from pred_future_values.
+    
+    - pred_future_values: dict of { date: forecast_empty } for future days we might not have real data
+    - returns: forecast (float)
+    """
+    # Build holiday flags for `target_date` from output_df
+    row_match = output_df.index[output_df["parsed_output_date"] == target_date].tolist()
+    if not row_match:
+        row_output = {}
+    else:
+        row_output = output_df.loc[row_match[0]]
+    def outcol(c):
+        return safe_int(row_output.get(c, None))
+
+    Ramadan = outcol("IsStartOfRamadhan") or outcol("IsMidRamadhan") or outcol("IsEndOfRamadhan")
+    Moharram = outcol("IsStartOfMoharam") or outcol("IsMidMoharam") or outcol("IsEndOfMoharam")
+    Ashoora  = outcol("IsTasooaAshoora")
+    Arbain   = outcol("IsArbain")
+    Fetr     = outcol("IsFetr")
+    Shabe    = outcol("IsShabeGhadr")
+    S13      = outcol("Is13BeDar")
+    eEarly   = outcol("IsEarlyEsfand")
+    eLate    = outcol("IsLateEsfand")
+    Esfand   = int(eEarly or eLate)
+    L5       = outcol("IsLastDaysOfTheYear")
+    Nrz      = outcol("IsNorooz")
+    HolHol   = outcol("Hol_holiday")
+    HolNone  = outcol("Hol_none")
+    HolRel   = outcol("Hol_religious_holiday")
+    Yalda    = outcol("Yalda_dummy")
+
+    holiday_map = {
+      "Ramadan_dummy": Ramadan,
+      "Moharram_dummy": Moharram,
+      "Ashoora_dummy": Ashoora,
+      "Arbain_dummy": Arbain,
+      "Eid_Fetr_dummy": Fetr,
+      "Shabe_Ghadr_dummy": Shabe,
+      "Sizdah-be-Dar_dummy": S13,
+      "Esfand_dummy": Esfand,
+      "Last 5 Days of Esfand_dummy": L5,
+      "Norooz_dummy": Nrz,
+      "Hol_holiday": HolHol,
+      "Hol_none": HolNone,
+      "Hol_religious_holiday": HolRel,
+      "Yalda_dummy": Yalda
+    }
+
+    dow = target_date.weekday()
+    WD_ = {f"WD_{i}": 1 if i == dow else 0 for i in range(7)}
+
+    config = HOTEL_CONFIG[hotel_name]
+    prefix = config["model_prefix"]
+    final_order = config["column_order"]
+    lag_cols = config["lag_cols"]
+
+    # We want to load the SHIFT=0 model for that hotel
+    best_model = best_model_map[hotel_name][0]  # shift=0
+    model_path = f"results/{prefix}/{best_model}_{prefix}0.pkl"
+
+    # Prepare features
+    feats = {}
+    feats.update(holiday_map)
+    feats.update(WD_)
+
+    # For lags 1..15, check the date that is (target_date - i days).
+    # If that date >= some "start_of_prediction" or is in pred_future_values, we use predicted data.
+    # Otherwise, we use real data from input_df.
+    def sum_cols_for_date(some_date, colnames):
+        # if there's a predicted value in pred_future_values for this day, return that
+        if some_date in pred_future_values:
+            return pred_future_values[some_date]
+        # otherwise, try reading from input_df
+        row_match2 = input_df.index[input_df["parsed_input_date"] == some_date].tolist()
+        if not row_match2:
+            return 0.0
+        row_i = row_match2[0]
+        total = 0.0
+        for c in colnames:
+            try:
+                total += float(input_df.loc[row_i, c])
+            except:
+                pass
+        return total
+
+    for i in range(1, 16):
+        lag_date = target_date - datetime.timedelta(days=i)
+        feats[f"Lag{i}_EmptyRooms"] = sum_cols_for_date(lag_date, lag_cols)
+
+    row_vals = [feats.get(c, 0.0) for c in final_order]
+
+    X_today = pd.DataFrame([row_vals], columns=final_order)
+
+    # Load model
+    try:
+        with open(model_path, "rb") as f:
+            loaded_model = pickle.load(f)
+    except FileNotFoundError as e:
+        st.error(f"[Hotel {hotel_name}, پیشخور SHIFT=0] Model file not found: {model_path}")
+        return np.nan
+    except Exception as e:
+        st.error(f"[Hotel {hotel_name}, پیشخور SHIFT=0] Error loading model {model_path}: {e}")
+        return np.nan
+
+    # Predict
+    if best_model in ["holt_winters", "exp_smoothing"]:
+        # for a SHIFT=0 univariate, it's typically the same approach, but we don't have the 'shift' param
+        # We'll do 1-step forecast
+        # but let's just follow the pattern:
+        return forecast_univariate_statsmodels(loaded_model, 0)
+    elif best_model == "moving_avg":
+        return forecast_moving_avg(loaded_model)
+    elif best_model == "ts_decomp_reg":
+        # for shift=0, we can do forecast_ts_decomp_reg with shift=0
+        return forecast_ts_decomp_reg(loaded_model, X_today, 0)
+    else:
+        try:
+            y_pred = loaded_model.predict(X_today)
+            return float(y_pred[0]) if len(y_pred) > 0 else np.nan
+        except Exception as e:
+            st.error(f"Prediction error for {model_path}: {e}")
+            return np.nan
+
+def pishkhor_for_hotel(hotel_name, start_date, input_df, output_df):
+    """
+    Recursive approach (پیش‌بینی پیشخور) for a single hotel, day0..day3.
+    day0 = start_date
+    day1 = start_date + 1
+    day2 = start_date + 2
+    day3 = start_date + 3
+
+    We only use the SHIFT=0 model repeatedly, filling in future lags with predicted empties.
+    Returns a list of 4 predicted empties: [pred_day0, pred_day1, pred_day2, pred_day3].
+    """
+    preds = []
+    pred_future_values = {}  # date -> empties
+    for d in range(4):
+        target_date = start_date + datetime.timedelta(days=d)
+        val = predict_shift0_hotel(hotel_name, target_date, input_df, output_df, pred_future_values)
+        # store it
+        preds.append(val)
+        pred_future_values[target_date] = val
+    return preds
+
+def pishkhor_for_chain(start_date, input_df, output_df):
+    """
+    Recursive approach for the chain SHIFT=0 model, day0..day3.
+    Returns a list [pred_day0, pred_day1, pred_day2, pred_day3].
+    """
+    # We'll do a similar approach to the hotel's SHIFT=0 function,
+    # but for the chain SHIFT=0 model.
+    # Let's define a small function like we did for hotels, specifically for chain SHIFT=0
+    return chain_pishkhor_shift0(start_date, input_df, output_df)
+
+def chain_pishkhor_shift0(start_date, input_df, output_df):
+    """
+    Similar logic: for each day from start_date + d, we build features for SHIFT=0 chain model,
+    substituting predicted values for future lags.
+    """
+    # We'll define a local function that does a single day forecast,
+    # then do it in a loop for day0..3.
+    preds = []
+    pred_future = {}
+
+    def predict_one_day_chain0(tdate):
+        # build holiday flags from output_df
+        row_match = output_df.index[output_df["parsed_output_date"] == tdate].tolist()
+        if not row_match:
+            row_output = {}
+        else:
+            row_output = output_df.loc[row_match[0]]
+
+        def outcol(c):
+            return safe_int(row_output.get(c, None))
+
+        Ramadan = outcol("IsStartOfRamadhan") or outcol("IsMidRamadhan") or outcol("IsEndOfRamadhan")
+        Ashoora = outcol("IsTasooaAshoora")
+        Fetr    = outcol("IsFetr")
+        Nrz     = outcol("IsNorooz")
+        S13     = outcol("Is13BeDar")
+        Yalda   = outcol("Yalda_dummy")
+        L5      = outcol("IsLastDaysOfTheYear")
+        HolHol  = outcol("Hol_holiday")
+        HolNone = outcol("Hol_none")
+        HolRel  = outcol("Hol_religious_holiday")
+
+        # some may be relevant:
+        # "Ashoora_dummy","Norooz_dummy","Sizdah-be-Dar_dummy","Last 5 Days of Esfand_dummy" etc.
+        # We'll pull everything from row_output if needed:
+
+        # "IsEarlyEsfand", "IsLateEsfand"
+        eEarly  = outcol("IsEarlyEsfand")
+        eLate   = outcol("IsLateEsfand")
+        Esfand  = int(eEarly or eLate)
+
+        # We place them
+        holiday_map = {
+          "Ramadan_dummy": Ramadan,
+          "Ashoora_dummy": Ashoora,
+          "Eid_Fetr_dummy": Fetr,
+          "Norooz_dummy": Nrz,
+          "Sizdah-be-Dar_dummy": S13,
+          "Yalda_dummy": Yalda,
+          "Last 5 Days of Esfand_dummy": L5,
+          "Hol_holiday": HolHol,
+          "Hol_none": HolNone,
+          "Hol_religious_holiday": HolRel,
+          "Esfand_dummy": Esfand
+        }
+
+        dow = tdate.weekday()
+        WD_ = {f"WD_{i}": 1 if i == dow else 0 for i in range(7)}
+
+        chain_cfg = {
+          "lag_cols": ["Blank"],
+          "column_order": [
+            "Ramadan_dummy","Ashoora_dummy","Eid_Fetr_dummy","Norooz_dummy",
+            "Sizdah-be-Dar_dummy","Yalda_dummy","Last 5 Days of Esfand_dummy",
+            "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms",
+            "Lag5_EmptyRooms","Lag6_EmptyRooms","Lag7_EmptyRooms","Lag8_EmptyRooms",
+            "Lag9_EmptyRooms","Lag10_EmptyRooms",
+            "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6",
+            "Hol_holiday","Hol_none","Hol_religious_holiday","Esfand_dummy"
+          ]
+        }
+
+        feats = {}
+        feats.update(holiday_map)
+        feats.update(WD_)
+
+        def get_chain_blank_for_date(dt_):
+            # if dt_ in pred_future, use that
+            if dt_ in pred_future:
+                return pred_future[dt_]
+            # otherwise, read from input_df
+            row_m = input_df.index[input_df["parsed_input_date"] == dt_].tolist()
+            if not row_m:
+                return 0.0
+            r_idx = row_m[0]
+            try:
+                val = float(input_df.loc[r_idx, "Blank"])
+                return val
+            except:
+                return 0.0
+
+        # fill lag 1..10 with either predicted or real
+        for i in range(1, 11):
+            date_lag = tdate - datetime.timedelta(days=i)
+            feats[f"Lag{i}_EmptyRooms"] = get_chain_blank_for_date(date_lag)
+
+        row_vals = [feats.get(c, 0.0) for c in chain_cfg["column_order"]]
+        X_chain = pd.DataFrame([row_vals], columns=chain_cfg["column_order"])
+
+        # Load the chain SHIFT=0 model
+        bestm = chain_shift_models[0]  # SHIFT=0
+        mp = f"results/Chain/{bestm}_Chain0.pkl"
+        
+        try:
+            with open(mp, "rb") as f:
+                loaded_chain = pickle.load(f)
+        except FileNotFoundError as e:
+            st.error(f"[Chain پیشخور SHIFT=0] Model file not found: {mp}")
+            return np.nan
+        except Exception as e:
+            st.error(f"[Chain پیشخور SHIFT=0] Error loading model {mp}: {e}")
+            return np.nan
+
+        if bestm in ["holt_winters", "exp_smoothing"]:
+            # 1-step forecast
+            return forecast_univariate_statsmodels(loaded_chain, 0)
+        elif bestm == "moving_avg":
+            return forecast_moving_avg(loaded_chain)
+        elif bestm == "ts_decomp_reg":
+            return forecast_ts_decomp_reg(loaded_chain, X_chain, 0)
+        else:
+            try:
+                y_pred = loaded_chain.predict(X_chain)
+                return float(y_pred[0]) if len(y_pred) > 0 else np.nan
+            except Exception as e:
+                st.error(f"Prediction error for chain model {mp}: {e}")
+                return np.nan
+
+    # Now do day0..day3
+    for d in range(4):
+        tdate = start_date + datetime.timedelta(days=d)
+        val = predict_one_day_chain0(tdate)
+        preds.append(val)
+        pred_future[tdate] = val
+
+    return preds
+
+
 def main_page():
     load_css()
     st.image("tmoble.png", width=180)
 
-    # Refresh button to clear cached data
+    # Refresh button
     if st.button("به روز رسانی"):
         st.cache_data.clear()
         st.success("داده‌ها ریست شدند و مجدداً بارگیری خواهند شد.")
@@ -415,171 +1016,12 @@ def main_page():
     else:
         idx_today_output = match_out[0]
 
-    # Model configurations
-    best_model_map = {
-      "Ashrafi": ["linear_reg","random_forest","random_forest","random_forest","random_forest","random_forest","lasso_reg"],
-      "Evin":    ["linear_reg","linear_reg","linear_reg","random_forest","random_forest","random_forest","random_forest"],
-      "Gandhi":  ["lasso_reg","lasso_reg","holt_winters","holt_winters","holt_winters","holt_winters","holt_winters"],
-      "Jordan":  ["ridge_reg","ridge_reg","lasso_reg","linear_reg","lasso_reg","linear_reg","lasso_reg"],
-      "Keshavarz": ["lasso_reg","random_forest","random_forest","ridge_reg","ridge_reg","ridge_reg","ridge_reg"],
-      "Koroush": ["ridge_reg","lasso_reg","ridge_reg","ridge_reg","random_forest","ridge_reg","ridge_reg"],
-      "Mirdamad": ["poisson_reg","linear_reg","lasso_reg","lasso_reg","lasso_reg","lasso_reg","poisson_reg"],
-      "Niloofar": ["random_forest","ridge_reg","ridge_reg","ridge_reg","ridge_reg","lasso_reg","ridge_reg"],
-      "Nofel":   ["lasso_reg","random_forest","poisson_reg","lasso_reg","poisson_reg","poisson_reg","poisson_reg"],
-      "Parkway": ["ridge_reg","random_forest","lasso_reg","lasso_reg","lasso_reg","lasso_reg","lasso_reg"],
-      "Pasdaran": ["linear_reg","linear_reg","linear_reg","random_forest","lasso_reg","poisson_reg","poisson_reg"],
-      "Toranj":  ["lasso_reg","poisson_reg","poisson_reg","poisson_reg","moving_avg","moving_avg","moving_avg"],
-      "Valiasr": ["linear_reg","linear_reg","linear_reg","linear_reg","linear_reg","linear_reg","random_forest"],
-      "Vila":    ["poisson_reg","lasso_reg","lasso_reg","ridge_reg","ridge_reg","lasso_reg","ridge_reg"]
-    }
-    chain_shift_models = ["linear_reg","xgboost","xgboost","xgboost","linear_reg","xgboost","linear_reg"]
-
-    HOTEL_CONFIG = {
-       "Ashrafi": {
-         "model_prefix": "Ashrafi",
-         "lag_cols": ["AshrafiN", "AshrafiS"],
-         "column_order": [
-            "Ramadan_dummy","Moharram_dummy","Eid_Fetr_dummy","Norooz_dummy","Sizdah-be-Dar_dummy",
-            "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms","Lag5_EmptyRooms",
-            "Lag6_EmptyRooms","Lag7_EmptyRooms","Lag8_EmptyRooms","Lag9_EmptyRooms","Lag10_EmptyRooms",
-            "Lag11_EmptyRooms","Lag12_EmptyRooms","WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6"
-         ]
-       },
-       "Evin": {
-         "model_prefix": "Evin",
-         "lag_cols": ["Evin"],
-         "column_order": [
-           "Ramadan_dummy","Shabe_Ghadr_dummy","Norooz_dummy","Sizdah-be-Dar_dummy",
-           "Esfand_dummy","Last 5 Days of Esfand_dummy",
-           "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms","Lag5_EmptyRooms",
-           "Lag6_EmptyRooms","Lag7_EmptyRooms","Lag8_EmptyRooms",
-           "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6"
-         ]
-       },
-       "Gandhi": {
-         "model_prefix": "Gandhi",
-         "lag_cols": ["Ghandi1", "Ghandi2"],
-         "column_order": [
-           "Ramadan_dummy","Moharram_dummy","Shabe_Ghadr_dummy","Eid_Fetr_dummy","Norooz_dummy",
-           "Sizdah-be-Dar_dummy","Yalda_dummy","Last 5 Days of Esfand_dummy",
-           "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms","Lag5_EmptyRooms",
-           "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6"
-         ]
-       },
-       "Jordan": {
-         "model_prefix": "Jordan",
-         "lag_cols": ["JordanN", "JordanS"],
-         "column_order": [
-           "Ramadan_dummy","Moharram_dummy","Eid_Fetr_dummy","Norooz_dummy","Sizdah-be-Dar_dummy",
-           "Esfand_dummy","Last 5 Days of Esfand_dummy",
-           "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms","Lag5_EmptyRooms",
-           "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6"
-         ]
-       },
-       "Keshavarz": {
-         "model_prefix": "Keshavarz",
-         "lag_cols": ["Keshavarz"],
-         "column_order": [
-           "Ramadan_dummy","Eid_Fetr_dummy","Norooz_dummy","Sizdah-be-Dar_dummy","Last 5 Days of Esfand_dummy",
-           "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms","Lag5_EmptyRooms",
-           "Lag6_EmptyRooms","Lag7_EmptyRooms","Lag8_EmptyRooms","Lag9_EmptyRooms",
-           "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6"
-         ]
-       },
-       "Koroush": {
-         "model_prefix": "Kourosh",
-         "lag_cols": ["Kourosh"],
-         "column_order": [
-           "Eid_Fetr_dummy","Sizdah-be-Dar_dummy","Yalda_dummy",
-           "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms","Lag5_EmptyRooms",
-           "Lag6_EmptyRooms","Lag7_EmptyRooms","Lag8_EmptyRooms",
-           "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6",
-           "Hol_holiday","Hol_none","Hol_religious_holiday"
-         ]
-       },
-       "Mirdamad": {
-         "model_prefix": "Mirdamad",
-         "lag_cols": ["Mirdamad1", "Mirdamad2"],
-         "column_order": [
-           "Moharram_dummy","Arbain_dummy","Shabe_Ghadr_dummy","Sizdah-be-Dar_dummy","Esfand_dummy",
-           "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms","Lag5_EmptyRooms",
-           "Lag6_EmptyRooms","Lag7_EmptyRooms","Lag8_EmptyRooms","Lag9_EmptyRooms","Lag10_EmptyRooms",
-           "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6"
-         ]
-       },
-       "Niloofar": {
-         "model_prefix": "Niloofar",
-         "lag_cols": ["NiloofarJacuzi", "Niloofar2R", "Niloofar104"],
-         "column_order": [
-           "Eid_Fetr_dummy",
-           "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms","Lag5_EmptyRooms",
-           "Lag6_EmptyRooms","Lag7_EmptyRooms","Lag8_EmptyRooms","Lag9_EmptyRooms",
-           "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6"
-         ]
-       },
-       "Nofel": {
-         "model_prefix": "Nofel",
-         "lag_cols": ["Nofel1", "Nofel2"],
-         "column_order": [
-           "Ramadan_dummy","Shabe_Ghadr_dummy","Norooz_dummy","Sizdah-be-Dar_dummy",
-           "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms","Lag5_EmptyRooms",
-           "Lag6_EmptyRooms","Lag7_EmptyRooms","Lag8_EmptyRooms","Lag9_EmptyRooms","Lag10_EmptyRooms",
-           "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6"
-         ]
-       },
-       "Parkway": {
-         "model_prefix": "Parkway",
-         "lag_cols": ["Parkway70", "Parkway80", "Parkway105", "Parkway6"],
-         "column_order": [
-           "Ramadan_dummy","Moharram_dummy","Eid_Fetr_dummy","Norooz_dummy","Sizdah-be-Dar_dummy","Yalda_dummy",
-           "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms","Lag5_EmptyRooms","Lag6_EmptyRooms",
-           "Lag7_EmptyRooms","Lag8_EmptyRooms","Lag9_EmptyRooms","Lag10_EmptyRooms","Lag11_EmptyRooms","Lag12_EmptyRooms","Lag13_EmptyRooms",
-           "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6"
-         ]
-       },
-       "Pasdaran": {
-         "model_prefix": "Pasdaran",
-         "lag_cols": ["Pasdaran1", "Pasdaran2"],
-         "column_order": [
-           "Ashoora_dummy","Norooz_dummy","Sizdah-be-Dar_dummy","Last 5 Days of Esfand_dummy",
-           "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms",
-           "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6"
-         ]
-       },
-       "Toranj": {
-         "model_prefix": "Toranj",
-         "lag_cols": ["Toranj"],
-         "column_order": [
-           "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms","Lag5_EmptyRooms",
-           "Lag6_EmptyRooms","Lag7_EmptyRooms","Lag8_EmptyRooms","Lag9_EmptyRooms","Lag10_EmptyRooms","Lag11_EmptyRooms",
-           "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6","Hol_holiday","Hol_none"
-         ]
-       },
-       "Valiasr": {
-         "model_prefix": "Valiasr",
-         "lag_cols": ["ValiasrN", "ValiasrS"],
-         "column_order": [
-           "Ramadan_dummy","Shabe_Ghadr_dummy","Norooz_dummy","Sizdah-be-Dar_dummy","Last 5 Days of Esfand_dummy",
-           "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms",
-           "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6"
-         ]
-       },
-       "Vila": {
-         "model_prefix": "Vila",
-         "lag_cols": ["VilaA", "VilaB"],
-         "column_order": [
-           "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms","Lag5_EmptyRooms",
-           "Lag6_EmptyRooms","Lag7_EmptyRooms","Lag8_EmptyRooms","Lag9_EmptyRooms",
-           "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6","Hol_holiday","Hol_none"
-         ]
-       }
-    }
-
-    # Build holiday flags from the Output row
+    # Model configurations for holiday flags
     if idx_today_output is not None:
         row_output_today = output_df.loc[idx_today_output]
         def outcol(c):
             return safe_int(row_output_today.get(c, None))
+
         Ramadan = outcol("IsStartOfRamadhan") or outcol("IsMidRamadhan") or outcol("IsEndOfRamadhan")
         Moharram = outcol("IsStartOfMoharam") or outcol("IsMidMoharam") or outcol("IsEndOfMoharam")
         Ashoora = outcol("IsTasooaAshoora")
@@ -631,95 +1073,7 @@ def main_page():
                 pass
         return total
 
-    def predict_hotel_shift(hotel_name, shift):
-        best_model = best_model_map[hotel_name][shift]
-        config = HOTEL_CONFIG[hotel_name]
-        prefix = config["model_prefix"]
-        final_order = config["column_order"]
-        lag_cols = config["lag_cols"]
-
-        feats = {}
-        feats.update(holiday_map)
-        feats.update(WD_)
-        for i in range(1, 16):
-            row_i = idx_today_input - i
-            feats[f"Lag{i}_EmptyRooms"] = sum_cols_for_row(row_i, lag_cols)
-
-        row_vals = [feats.get(c, 0.0) for c in final_order]
-        X_today = pd.DataFrame([row_vals], columns=final_order)
-        model_path = f"results/{prefix}/{best_model}_{prefix}{shift}.pkl"
-        try:
-            with open(model_path, "rb") as f:
-                loaded_model = pickle.load(f)
-        except FileNotFoundError as e:
-            st.error(f"[Hotel {hotel_name}, shift={shift}] Model file not found: {model_path}")
-            return np.nan
-        except Exception as e:
-            st.error(f"[Hotel {hotel_name}, shift={shift}] Error loading model {model_path}: {e}")
-            return np.nan
-        
-        if best_model in ["holt_winters", "exp_smoothing"]:
-            return forecast_univariate_statsmodels(loaded_model, shift)
-        elif best_model == "moving_avg":
-            return forecast_moving_avg(loaded_model)
-        elif best_model == "ts_decomp_reg":
-            return forecast_ts_decomp_reg(loaded_model, X_today, shift)
-        else:
-            try:
-                y_pred = loaded_model.predict(X_today)
-                return float(y_pred[0]) if len(y_pred) > 0 else np.nan
-            except Exception as e:
-                st.error(f"Prediction error for {model_path}: {e}")
-                return np.nan
-
-    def predict_chain_shift(shift):
-        bestm = chain_shift_models[shift]
-        chain_cfg = {
-          "lag_cols": ["Blank"],
-          "column_order": [
-            "Ramadan_dummy","Ashoora_dummy","Eid_Fetr_dummy","Norooz_dummy",
-            "Sizdah-be-Dar_dummy","Yalda_dummy","Last 5 Days of Esfand_dummy",
-            "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms",
-            "Lag5_EmptyRooms","Lag6_EmptyRooms","Lag7_EmptyRooms","Lag8_EmptyRooms",
-            "Lag9_EmptyRooms","Lag10_EmptyRooms",
-            "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6",
-            "Hol_holiday","Hol_none","Hol_religious_holiday"
-          ]
-        }
-        feats = {}
-        feats.update(holiday_map)
-        feats.update(WD_)
-        for i in range(1, 11):
-            row_i = idx_today_input - i
-            feats[f"Lag{i}_EmptyRooms"] = sum_cols_for_row(row_i, chain_cfg["lag_cols"])
-        row_vals = [feats.get(c, 0.0) for c in chain_cfg["column_order"]]
-        X_chain = pd.DataFrame([row_vals], columns=chain_cfg["column_order"])
-        mp = f"results/Chain/{bestm}_Chain{shift}.pkl"
-        
-        try:
-            with open(mp, "rb") as f:
-                loaded_chain = pickle.load(f)
-        except FileNotFoundError as e:
-            st.error(f"[Chain shift={shift}] Model file not found: {mp}")
-            return np.nan
-        except Exception as e:
-            st.error(f"[Chain shift={shift}] Error loading model {mp}: {e}")
-            return np.nan
-        
-        if bestm in ["holt_winters", "exp_smoothing"]:
-            return forecast_univariate_statsmodels(loaded_chain, shift)
-        elif bestm == "moving_avg":
-            return forecast_moving_avg(loaded_chain)
-        elif bestm == "ts_decomp_reg":
-            return forecast_ts_decomp_reg(loaded_chain, X_chain, shift)
-        else:
-            try:
-                ypred = loaded_chain.predict(X_chain)
-                return float(ypred[0]) if len(ypred) > 0 else np.nan
-            except Exception as e:
-                st.error(f"Prediction error for chain model {mp}: {e}")
-                return np.nan
-
+    # Prepare day_results
     def get_day_label(shift):
         if shift == 0:
             return "امروز"
@@ -733,14 +1087,13 @@ def main_page():
     pickup_df = get_data_from_pickup_sheet()
     pickup_pivot_df = build_pickup_pivot(pickup_df)
 
-    # Gather day results for shifts 0..3
     day_results = []
     for shift in range(4):
         hotels_list = list(best_model_map.keys())
-        hotel_preds = {h: predict_hotel_shift(h, shift) for h in hotels_list}
+        hotel_preds = {h: predict_hotel_shift(h, shift, idx_today_input, input_df, holiday_map, WD_) 
+                       for h in hotels_list}
         sum_houses = sum(v for v in hotel_preds.values() if not pd.isna(v))
-
-        chain_pred = predict_chain_shift(shift)
+        chain_pred = predict_chain_shift(shift, idx_today_input, input_df, holiday_map, WD_)
 
         row_future = idx_today_input + shift
         try:
@@ -764,7 +1117,7 @@ def main_page():
         whole_chain = min(chain_pred, future_blank)
         robust = 0.5 * (sum_houses + whole_chain)
 
-        arrival_date_for_shift = datetime.datetime.now(tehran_tz).date() + datetime.timedelta(days=shift)
+        arrival_date_for_shift = system_today + datetime.timedelta(days=shift)
         pickup_pred = predict_pickup_for_shift(arrival_date_for_shift, pickup_pivot_df, shift)
         if (pickup_pred is not None) and (not np.isnan(pickup_pred)):
             pickup_pred = int(math.ceil(pickup_pred))
@@ -773,7 +1126,6 @@ def main_page():
 
         displayed_pred = int(min(int(round(robust)), int(round(future_blank)) - uncertain_val))
 
-        # >>>>>>> CRITICAL CHANGE: we store hotel_preds here so the "بحرانی" section can access it <<<<<<<
         day_results.append({
             "shift": shift,
             "label": get_day_label(shift),
@@ -785,10 +1137,43 @@ def main_page():
             "پیش بینی نهایی": int(round(robust)),
             "مدل پیکآپ": pickup_pred,
             "پیش بینی نمایشی": displayed_pred,
-            "hotel_preds": hotel_preds  # <-- THIS is the fix
+            "hotel_preds": hotel_preds
+            # We will add the پیش‌بینی پیشخور تلفیقی & کلی below
         })
 
+    # -------------------------------------------------------------------------
+    # Now we compute the "پیش‌بینی پیشخور تلفیقی" and "پیش‌بینی پیشخور کلی"
+    # using the new approach (recursive SHIFT=0 usage).
+    # -------------------------------------------------------------------------
+
+    # 1) Per-Hotel پیشخور
+    pishkhor_hotels = {}
+    for h in best_model_map.keys():
+        pishkhor_hotels[h] = pishkhor_for_hotel(h, system_today, input_df, output_df)
+        # This yields a 4-element list [day0, day1, day2, day3]
+
+    # Sum across hotels for each day = "پیش‌بینی پیشخور تلفیقی"
+    pishkhor_telefiqi = []
+    for d in range(4):
+        s = 0.0
+        for h in pishkhor_hotels.keys():
+            val = pishkhor_hotels[h][d]
+            if not pd.isna(val):
+                s += val
+        pishkhor_telefiqi.append(s)
+
+    # 2) Chain پیشخور
+    pishkhor_chain_vals = pishkhor_for_chain(system_today, input_df, output_df)
+    # Also a 4-element list
+
+    # Now add them to day_results
+    for i in range(4):
+        day_results[i]["پیش‌بینی پیشخور تلفیقی"] = pishkhor_telefiqi[i]
+        day_results[i]["پیش‌بینی پیشخور کلی"] = pishkhor_chain_vals[i]
+
+    # -------------------------------------------------------------------------
     # Display prediction boxes
+    # -------------------------------------------------------------------------
     st.subheader("عدد پیش‌بینی")
     cols = st.columns(4)
     pred_gradient = "linear-gradient(135deg, #FFFFFF, #F0F0F0)"
@@ -845,11 +1230,13 @@ def main_page():
         with col:
             components.html(html_code, height=150, width=200)
 
+    # -------------------------------------------------------------------------
     # Display fuzzy status boxes
+    # -------------------------------------------------------------------------
     st.subheader("وضعیت بر اساس نرخ اشغال")
     cols = st.columns(4)
     for idx, (col, row) in enumerate(zip(cols, day_results)):
-        card_date = datetime.datetime.now(tehran_tz).date() + datetime.timedelta(days=row['shift'])
+        card_date = system_today + datetime.timedelta(days=row['shift'])
         target_weekday = card_date.weekday()
         weekday_label = row["روز هفته"] if "روز هفته" in row else ""
         
@@ -920,11 +1307,13 @@ def main_page():
         with col:
             components.html(html_code, height=150, width=200)
 
+    # -------------------------------------------------------------------------
     # Display pickup-based status
+    # -------------------------------------------------------------------------
     st.subheader("وضعیت بر اساس آمار رزرو")
     cols = st.columns(4)
     for idx, (col, row) in enumerate(zip(cols, day_results)):
-        arrival_date = datetime.datetime.now(tehran_tz).date() + datetime.timedelta(days=row['shift'])
+        arrival_date = system_today + datetime.timedelta(days=row['shift'])
         count0 = get_pickup_value_for_day(pickup_pivot_df, arrival_date, 0)
         count1 = get_pickup_value_for_day(pickup_pivot_df, arrival_date, 1)
         count2 = get_pickup_value_for_day(pickup_pivot_df, arrival_date, 2)
@@ -956,7 +1345,7 @@ def main_page():
             extra_content = ""
         
         pickup_val = row['مدل پیکآپ']
-        display_val = 0
+        display_val = 0  # Not used in color logic, but could be
         color_val = max(0, 100-(pickup_val + display_val))
         
         c_code = fuzz_color(color_val)
@@ -1012,8 +1401,10 @@ def main_page():
         """
         with col:
             components.html(html_code, height=150, width=200)
-    
+
+    # -------------------------------------------------------------------------
     # Notes
+    # -------------------------------------------------------------------------
     st.subheader("مناسبت‌های فصلی ویژه امروز")
     notes = []
     if idx_today_output is not None:
@@ -1048,25 +1439,20 @@ def main_page():
     st.subheader("مجموعه‌های بحرانی بر اساس پیش‌بینی")
     for day_res in day_results:
         shift = day_res["shift"]
-        label = day_res["label"]  # e.g. "امروز", "فردا", "پسفردا", "سه روز بعد"
+        label = day_res["label"]
         hotel_preds_for_shift = day_res.get("hotel_preds", {})
     
-        # 1) Filter out hotels with forecast ≤ 3 empties 
+        # Filter out hotels with forecast > 3 empties
         filtered_hotels = [(h, val) for (h, val) in hotel_preds_for_shift.items()
                            if (not pd.isna(val)) and (val > 3)]
         if not filtered_hotels:
-            # No hotel above 3 empties → skip
             continue
     
-        # 2) Sum total empties among these hotels
         total_empties = sum(val for _, val in filtered_hotels)
         if total_empties <= 0:
             continue
     
-        # 3) Sort descending by empties
         filtered_hotels.sort(key=lambda x: x[1], reverse=True)
-    
-        # 4) Pareto: accumulate until reaching >= 80% of empties
         cutoff = 0.8 * total_empties
         cumsum = 0.0
         critical_hotels = []
@@ -1077,16 +1463,12 @@ def main_page():
                 break
     
         if not critical_hotels:
-            # No one reached the 80% cutoff
             continue
     
-        # Build a text block for st.info with no bullet points:
-        # First line: a heading for this day
         lines = [f"**مجموعه‌های بحرانی برای {label}:**\n"]
     
         row_future = idx_today_input + shift
         for (wh, pred_val) in critical_hotels:
-            # Sum actual empties from input_df (the “current empties”)
             config = HOTEL_CONFIG.get(wh, {})
             cols_for_hotel = config.get("lag_cols", [])
             if (row_future < 0 or row_future >= len(input_df)) or not cols_for_hotel:
@@ -1100,16 +1482,12 @@ def main_page():
                         pass
     
             fa_name = hotel_name_map.get(wh, wh)
-            # Add a line for this hotel. No bullet/dot, just a line.
             lines.append(
                 f"مجموعه **{fa_name}** با پیش‌بینی **{int(round(pred_val))}** خالی برای {label} بحرانی است. "
                 f"تعداد خالی فعلی این مجموعه، **{int(round(current_empties))}** است.\n"
             )
     
-        # Join all lines into one text block
         final_text = "\n".join(lines)
-    
-        # Show it in a Streamlit info box → light‐blue background, dark text
         st.info(final_text)
 
     st.write("---")
@@ -1203,6 +1581,9 @@ def main_page():
                         scopes=SCOPES_WRITE
                     )
                     client_write = gspread.authorize(creds_write)
+                    second_spreadsheet_id = "1Pz_zyb7DAz6CnvFrqv77uBP2Z_L7OnjOZkW0dj3m3HY"
+                    sheet_write = client_write.open_by_key(second_spreadsheet_id).worksheet("Sheet1")
+                    all_records = sheet_write.get_all_records()
                     full_cols = [
                         "Date",
                         "idrom today", "idrom tomorrow", "idrom 2days", "idrom 3days",
@@ -1217,9 +1598,6 @@ def main_page():
                         "Ehsan today reason", "Ehsan tomorrow reason", "Ehsan 2days reason", "Ehsan 3days reason",
                         "Idrom Time", "Fereshteh Time", "Arash Time", "Farzin Time", "Ehsan Time"
                     ]
-                    second_spreadsheet_id = "1Pz_zyb7DAz6CnvFrqv77uBP2Z_L7OnjOZkW0dj3m3HY"
-                    sheet_write = client_write.open_by_key(second_spreadsheet_id).worksheet("Sheet1")
-                    all_records = sheet_write.get_all_records()
                     df_second = pd.DataFrame(all_records)
                     if df_second.empty:
                         df_second = pd.DataFrame(columns=full_cols)
@@ -1250,7 +1628,6 @@ def main_page():
                     sheet_write.clear()
                     sheet_write.update("A1", data_to_write)
                     st.success("پیش‌بینی شما با موفقیت ثبت شد.")
-
 
 def main():
     st.set_page_config(page_title="داشبورد پیش‌بینی", page_icon="📈", layout="wide")
