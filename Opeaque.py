@@ -540,7 +540,7 @@ def main():
     if not st.session_state.auth_ok:
         typed = st.text_input("رمز عبور:", type="password")
         if st.button("ورود"):
-            if typed==st.secrets["tmol_passwords"]:
+            if typed==st.secrets["Password"]:
                 st.session_state.auth_ok=True
                 st.experimental_rerun()
             else:
