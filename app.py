@@ -1104,9 +1104,10 @@ def main_page():
           {weekday_label}‌های سال: {avg_year:.0f}
         """
         
-        ptf = row["پیش بینی تفکیکی"]
-        ptk = row["پیش‌بینی کلی"]
-        colors_list = [fuzz_color(ptf), fuzz_color(ptk)]
+        # ptf = row["پیش بینی تفکیکی"]
+        # ptk = row["پیش‌بینی کلی"]
+        pwc = row ['پیش‌بینی نهایی بدبینانه']
+        colors_list = [fuzz_color(pwc)]
         final_code = union_fuzzy(colors_list)
         hex_col = color_code_to_hex(final_code)
         gradient = f"linear-gradient(135deg, {hex_col}, {hex_col})"
