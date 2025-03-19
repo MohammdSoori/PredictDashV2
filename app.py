@@ -1078,7 +1078,7 @@ def main_page():
         <div class="score-box" onclick="togglePredExtra_{idx}()">
             <div><b>{row['label']}</b></div>
             <div><b>{row['روز هفته']}</b></div>
-            <div><b>پیش‌بینی: {row['پیش‌بینی نهایی بدبینانه']}</b></div>
+            <div><b>پیش‌بینی: {row['پیش‌بینی پیشخور کلی']}</b></div>
             {extra_content}
         </div>
         </body>
