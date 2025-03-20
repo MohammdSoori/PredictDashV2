@@ -568,7 +568,6 @@ def main_page():
         extra_content = f"""
         <div id="pred-extra-{idx}" class="extra-text">
           <div>تعداد خالی فعلی: {row['تعداد خالی فعلی']}</div>
-          <div>غیرقطعی: {row['غیرقطعی']}</div>
         </div>
         """
         html_code = f"""
