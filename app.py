@@ -1330,7 +1330,7 @@ def main_page():
                 continue 
             show_val = min(pred_val,current_empties)
             if current_empties - show_val <=2:
-            show_val = max(0,show_val - 3)
+                show_val = max(0,show_val - 3)
             if show_val <=2:
                 continue
             lines.append(
