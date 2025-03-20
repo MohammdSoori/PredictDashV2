@@ -995,6 +995,7 @@ def main_page():
     pishkhor_chain_vals = pishkhor_for_chain(system_today, input_df, output_df, chain_shift_models)
 
     for i in range(4):
+        st.write(pishkhor_telefiqi[i])
         day_results[i]["پیش‌بینی پیشخور تلفیقی"] = int(round(pishkhor_telefiqi[i]))
         day_results[i]["پیش‌بینی پیشخور کلی"]   = int(round(pishkhor_chain_vals[i]))
 
