@@ -1329,6 +1329,10 @@ def main_page():
             if int(round(current_empties))<=2:
                 continue 
             show_val = min(pred_val,current_empties)
+            if current_empties - show_val <=2:
+            show_val = max(0,show_val - 3)
+            if show_val <=2:
+                continue
             lines.append(
                 f"مجموعه **{fa_name}** با پیش‌بینی **{int(round(show_val))}** خالی برای {label} بحرانی است. "
                 f"تعداد خالی فعلی این مجموعه، **{int(round(current_empties))}** است.\n"
