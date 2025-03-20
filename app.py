@@ -405,6 +405,7 @@ def pishkhor_for_hotel(hotel_name, start_date, input_df, output_df, best_model_m
             for c in lag_cols:
                 try:
                     total_ += float(input_df.loc[ridx, c])
+                    st.write(input_df.loc[ridx, c])
                 except:
                     pass
             return total_
