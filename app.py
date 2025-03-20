@@ -438,7 +438,8 @@ def pishkhor_for_hotel(hotel_name, start_date, input_df, output_df, best_model_m
                 pred_val = float(pp[0]) if len(pp) > 0 else np.nan
             except:
                 pred_val = np.nan
-
+        if pred_val >= 100:
+            pred_val=100
         results_4.append(pred_val)
         predicted_cache[d_] = pred_val
 
