@@ -1326,7 +1326,7 @@ def main_page():
                         pass
             
             fa_name = hotel_name_map.get(wh, wh)
-            if int(round(current_empties)<=2:
+            if int(round(current_empties))<=2:
                 continue 
             show_val = min(pred_val,current_empties)
             lines.append(
