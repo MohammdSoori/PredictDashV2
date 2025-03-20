@@ -1290,7 +1290,7 @@ def main_page():
                            if (not pd.isna(val)) and (val > 3)]
         if not filtered_hotels:
             continue
-    
+        
         total_empties = sum(val for _, val in filtered_hotels)
         if total_empties <= 0:
             continue
@@ -1310,7 +1310,7 @@ def main_page():
             continue
     
         lines = [f"**مجموعه‌های بحرانی برای {label}:**\n"]
-    
+        
         row_future = idx_today_input + shift
         for (wh, pred_val) in critical_hotels:
             config = HOTEL_CONFIG.get(wh, {})
@@ -1324,10 +1324,13 @@ def main_page():
                         current_empties += float(input_df.loc[row_future, c])
                     except:
                         pass
-    
+            
             fa_name = hotel_name_map.get(wh, wh)
+            if int(round(current_empties)<=2:
+                continue 
+            show_val = min(pred_val,current_empties)
             lines.append(
-                f"مجموعه **{fa_name}** با پیش‌بینی **{int(round(pred_val))}** خالی برای {label} بحرانی است. "
+                f"مجموعه **{fa_name}** با پیش‌بینی **{int(round(show_val))}** خالی برای {label} بحرانی است. "
                 f"تعداد خالی فعلی این مجموعه، **{int(round(current_empties))}** است.\n"
             )
     
