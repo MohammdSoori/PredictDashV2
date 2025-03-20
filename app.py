@@ -569,7 +569,7 @@ def main_page():
     )
 
     # (NEW: the small toggle)
-    st.markdown("<div style='text-align: center; margin-bottom: -5px;'><small>نمایش پیش‌بینی بر اساس دیدگاه:</small></div>", unsafe_allow_html=True)
+    st.markdown("<div style='text-align: center; margin-bottom: -5px;'><small>سناریو را انتخاب کنید:</small></div>", unsafe_allow_html=True)
     prediction_view_option = st.radio(
         " ",
         ["خوش‌بینانه", "واقع‌بینانه", "بدبینانه"],
