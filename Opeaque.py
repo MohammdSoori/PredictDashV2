@@ -502,7 +502,7 @@ def main_page():
     st.markdown(f'<div class="scoreboard">تاریخ میلادی: {greg_str} &nbsp;&nbsp;|&nbsp;&nbsp; تاریخ جلالی: {jalali_str}</div>', unsafe_allow_html=True)
     
     # Toggle for prediction view
-    prediction_view_option = st.radio("نمایش پیش‌بینی بر اساس دیدگاه:", 
+    prediction_view_option = st.radio("سناریو را انتخاب کنید:", 
                                       ["خوش‌بینانه", "واقع‌بینانه", "بدبینانه"],
                                       index=1, horizontal=True)
     
