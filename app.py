@@ -396,8 +396,6 @@ def pishkhor_for_hotel(hotel_name, start_date, input_df, output_df, best_model_m
 
         def get_empties_for_date(d_):
             if d_ in predicted_cache:
-                # st.write("predicted log: ")
-                # st.write(predicted_cache[d_])
                 return predicted_cache[d_]
             row_m = input_df.index[input_df["parsed_input_date"] == d_].tolist()
             if not row_m:
@@ -409,8 +407,6 @@ def pishkhor_for_hotel(hotel_name, start_date, input_df, output_df, best_model_m
                     total_ += float(input_df.loc[ridx, c])
                 except:
                     pass
-            # st.write("total:")
-            # st.write(total_)
             return total_
 
         for lag in range(1, 16):
