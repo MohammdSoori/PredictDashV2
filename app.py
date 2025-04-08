@@ -1193,7 +1193,7 @@ def main_page():
             extra_content = ""
         
         pickup_val = row['مدل پیکآپ']
-        color_val = max(0, 100-(pickup_val))
+        color_val = max(0, (pickup_val))
         
         c_code = fuzz_color(color_val)
         final_code = union_fuzzy([c_code])
