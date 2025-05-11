@@ -1348,10 +1348,12 @@ def main_page():
     
     user_passwords = {
         "محمدرضا ایدرم": tmol_pw["idrom"],
+        "فرهاد حیدری" : tmol_pw["farhad"],
         "فرشته فرجی":   tmol_pw["fereshte"],
         "آرش پیریایی":  tmol_pw["arash"],
         "فرزین سوری":   tmol_pw["farzin"],
-        "احسان همایونی": tmol_pw["ehsan"]
+        "احسان همایونی": tmol_pw["ehsan"],
+        "امیرحسین محتشم" :tmol_pw["mohtasham"]
     }
 
     user_column_map = {
@@ -1389,6 +1391,20 @@ def main_page():
                 "Ehsan today reason", "Ehsan tomorrow reason", "Ehsan 2days reason", "Ehsan 3days reason"
             ],
             "time_col": "Ehsan Time"
+        },
+         "امیرحسین محتشم": {
+            "columns": [
+                "Mohtasham today", "Mohtasham tomorrow", "Mohtasham 2days", "Mohtasham 3days",
+                "Mohtasham today reason", "Mohtasham tomorrow reason", "Mohtasham 2days reason", "Mohtasham 3days reason"
+            ],
+            "time_col": "Mohtasham Time"
+        },
+        "فرهاد حیدری": {
+            "columns": [
+                "Farhad today", "Farhad tomorrow", "Farhad 2days", "Farhad 3days",
+                "Farhad today reason", "Farhad tomorrow reason", "Farhad 2days reason", "Farhad 3days reason"
+            ],
+            "time_col": "Farhad Time"
         }
     }
 
@@ -1447,7 +1463,11 @@ def main_page():
                         "Farzin today reason", "Farzin tomorrow reason", "Farzin 2days reason", "Farzin 3days reason",
                         "Ehsan today", "Ehsan tomorrow", "Ehsan 2days", "Ehsan 3days",
                         "Ehsan today reason", "Ehsan tomorrow reason", "Ehsan 2days reason", "Ehsan 3days reason",
-                        "Idrom Time", "Fereshteh Time", "Arash Time", "Farzin Time", "Ehsan Time"
+                        "Mohtasham today", "Mohtasham tomorrow", "Mohtasham 2days", "Mohtasham 3days",
+                        "Mohtasham today reason", "Mohtasham tomorrow reason", "Mohtasham 2days reason", "Mohtasham 3days reason",
+                        "Farhad today", "Farhad tomorrow", "Farhad 2days", "Farhad 3days",
+                        "Farhad today reason", "Farhad tomorrow reason", "Farhad 2days reason", "Farhad 3days reason",
+                        "Idrom Time", "Fereshteh Time", "Arash Time", "Farzin Time", "Ehsan Time","Mohtasham Time","Farhad Time"
                     ]
                     df_second = pd.DataFrame(all_records)
                     if df_second.empty:
