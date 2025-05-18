@@ -1499,7 +1499,101 @@ def main_page():
                     sheet_write.clear()
                     sheet_write.update("A1", data_to_write)
                     st.success("پیش‌بینی شما با موفقیت ثبت شد.")
+                    # ---------------------------------------------------------------------
+        # Expert performance table (Sheet2)
+        # ---------------------------------------------------------------------
+        st.write("---")
+        st.subheader("عملکرد پیش‌بینی‌کنندگان")
+    
+        # 1) Read Sheet2 of the same spreadsheet:
+        creds_perf = service_account.Credentials.from_service_account_info(
+            st.secrets["gcp_service_account"],
+            scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
+        )
+        gc_perf = gspread.authorize(creds_perf)
+        perf_ws = gc_perf.open_by_key(
+            "1Pz_zyb7DAz6CnvFrqv77uBP2Z_L7OnjOZkW0dj3m3HY"
+        ).worksheet("Sheet2")
+        perf_df = pd.DataFrame(perf_ws.get_all_records())
+    
+        # 2) Prep
+        today_str = system_today.strftime("%Y/%m/%d")
+        # find index of today's row (0-based on get_all_records → row2 is index 0)
+        idxs = perf_df.index[perf_df["Date"] == today_str].tolist()
+        today_idx = idxs[0] if idxs else len(perf_df)-1
+        total_days = today_idx + 1  # number of rows from row2 through today
+    
+        # 3) Define experts and their columns
+        experts = {
+            "محمدرضا ایدرم":    ("Idrom MSE error",    "Idrom count",    "Idrom timing"),
+            "فرشته فرجی":      ("fereshteh MSE error","fereshteh count","fereshteh timing"),
+            "آرش پیریایی":     ("Arash MSE error",    "Arash count",    "Arash timing"),
+            "فرزین سوری":      ("Farzin MSE error",   "Farzin count",   "Farzin timing"),
+            "احسان همایونی":   ("Ehsan MSE error",    "Ehsan count",    "Ehsan timing"),
+            "امیرحسین محتشم":  ("Mohtasham MSE error","Mohtasham count","Mohtasham timing")
+        }
+    
+        records = []
+        for name, (mse_col, cnt_col, t_col) in experts.items():
+            # mean MSE
+            mse_avg = perf_df[mse_col].dropna().astype(float).mean()
+            # attendance days (from today’s row)
+            try:
+                attend = int(perf_df.loc[perf_df["Date"] == today_str, cnt_col].iloc[0])
+            except:
+                attend = 0
+            # participation %
+            pct = (attend / total_days) if total_days>0 else 0.0
+            # mean timing
+            timing_avg = perf_df[t_col].dropna().astype(float).mean()
+            records.append({
+                "نام": name,
+                "میانگین خطای پیش‌بینی": mse_avg,
+                "تعداد روزهای مشارکت": attend,
+                "درصد مشارکت": pct,
+                "میانگین سرعت پیش‌بینی": timing_avg
+            })
+    
+        perf = pd.DataFrame(records)
+    
+        # 4) Derive all metrics
+        perf["میانگین دقت پیش‌بینی"] = perf["میانگین خطای پیش‌بینی"] / 340 * 100
+        # rank timing (lower is better → rank 1 smallest)
+        perf["رتبه سرعت پیش‌بینی"] = perf["میانگین سرعت پیش‌بینی"].rank(method="min")
+        # min–max normalize
+        eps = 1e-6
+        perf["_e"] = (perf["میانگین خطای پیش‌بینی"] - perf["میانگین خطای پیش‌بینی"].min()) \
+                     / (perf["میانگین خطای پیش‌بینی"].max() - perf["میانگین خطای پیش‌بینی"].min() + eps)
+        perf["_c"] = (perf["تعداد روزهای مشارکت"] - perf["تعداد روزهای مشارکت"].min()) \
+                     / (perf["تعداد روزهای مشارکت"].max() - perf["تعداد روزهای مشارکت"].min() + eps)
+        perf["_r"] = (perf["رتبه سرعت پیش‌بینی"] - perf["رتبه سرعت پیش‌بینی"].min()) \
+                     / (perf["رتبه سرعت پیش‌بینی"].max() - perf["رتبه سرعت پیش‌بینی"].min() + eps)
+        perf["نمره نهایی"] = 0.5*perf["_e"] + 0.4*perf["_c"] + 0.1*perf["_r"]
+    
+        # 5) Final formatting & sort
+        perf["درصد مشارکت"] = (perf["درصد مشارکت"]*100).round(1).astype(str) + "%"
+        out = perf[[
+            "نام",
+            "میانگین دقت پیش‌بینی",
+            "میانگین خطای پیش‌بینی",
+            "تعداد روزهای مشارکت",
+            "درصد مشارکت",
+            "رتبه سرعت پیش‌بینی",
+            "نمره نهایی"
+        ]].sort_values("نمره نهایی", ascending=False)
+    
+        # 6) Render as RTL/Tahoma‐styled HTML table
+        st.markdown(
+            out.to_html(
+                index=False,
+                classes="stTable",
+                border=0,
+                justify="center"
+            ),
+            unsafe_allow_html=True
+        )
 
+                
 def main():
     st.set_page_config(page_title="داشبورد پیش‌بینی", page_icon="📈", layout="wide")
     main_page()
