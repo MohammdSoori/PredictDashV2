@@ -1344,13 +1344,15 @@ def main_page():
 
     st.write("---")
     st.subheader("ثبت پیش‌بینی خبرگان")
-
+    # Replace hard-coded passwords with values from st.secrets["tmol_passwords"]
     user_passwords = {
-        "محمدرضا ایدرم": "1234",
-        "فرشته فرجی":   "1234",
-        "آرش پیریایی":  "1234",
-        "فرزین سوری":   "1234",
-        "احسان همایونی": "1234"
+        "محمدرضا ایدرم":   st.secrets["tmol_passwords"]["idrom"],
+        "فرشته فرجی":      st.secrets["tmol_passwords"]["fereshte"],
+        "آرش پیریایی":     st.secrets["tmol_passwords"]["arash"],
+        "فرزین سوری":      st.secrets["tmol_passwords"]["farzin"],
+        "احسان همایونی":   st.secrets["tmol_passwords"]["ehsan"],
+        "امیرحسین محتشم":  st.secrets["tmol_passwords"]["mohtasham"],
+        "فرهاد حیدری":     st.secrets["tmol_passwords"]["farhad"]
     }
 
     user_column_map = {
