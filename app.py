@@ -18,14 +18,14 @@ tehran_tz = zoneinfo.ZoneInfo("Asia/Tehran")
 
 @st.cache_data
 def create_gsheets_connection():
-    """Create a cached connection to Google Sheets (read-only) using Streamlit secrets."""
-    service_account_info = st.secrets["gcp_service_account"]
+    """Create a cached connection to Google Sheets (read-only) using st.secrets."""
     creds = service_account.Credentials.from_service_account_info(
-        service_account_info,
+        st.secrets["gcp_service_account"],
         scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
     )
     service = build('sheets', 'v4', credentials=creds)
     return service
+
 
 def get_pickup_value_for_day(pivot_df, arrival_date, offset):
     """
@@ -206,18 +206,19 @@ def convert_farsi_number(num):
 
 @st.cache_data
 def get_data_from_pickup_sheet():
-    """Retrieve data from a Google Sheet (read-only) using credentials from Streamlit secrets."""
-    scopes = ['https://www.googleapis.com/auth/spreadsheets.readonly']
-    service_account_info = st.secrets["gcp_service_account"]
+    """Retrieve pickup data from Google Sheets using st.secrets for credentials."""
+    scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
     creds = service_account.Credentials.from_service_account_info(
-        service_account_info, 
+        st.secrets["gcp_service_account"],
         scopes=scopes
     )
     client = gspread.authorize(creds)
-    sheet = client.open_by_key("1D5ROCnoTKCFBQ8me8wLIri8mlaOUF4v1hsyC7LXIvAE").worksheet("Sheet1")
+    sheet = client.open_by_key(
+        "1D5ROCnoTKCFBQ8me8wLIri8mlaOUF4v1hsyC7LXIvAE"
+    ).worksheet("Sheet1")
     records = sheet.get_all_records()
-    df = pd.DataFrame(records)
-    return df
+    return pd.DataFrame(records)
+
 
 def build_pickup_pivot(df):
     df = df[["تاریخ معامله میلادی", "تاریخ ورود میلادی", "تعداد شب"]].copy()
@@ -1344,16 +1345,12 @@ def main_page():
     st.write("---")
     st.subheader("ثبت پیش‌بینی خبرگان")
 
-    tmol_pw = st.secrets["tmol_passwords"]
-    
     user_passwords = {
-        "محمدرضا ایدرم": tmol_pw["idrom"],
-        "فرهاد حیدری" : tmol_pw["farhad"],
-        "فرشته فرجی":   tmol_pw["fereshte"],
-        "آرش پیریایی":  tmol_pw["arash"],
-        "فرزین سوری":   tmol_pw["farzin"],
-        "احسان همایونی": tmol_pw["ehsan"],
-        "امیرحسین محتشم" :tmol_pw["mohtasham"]
+        "محمدرضا ایدرم": "1234",
+        "فرشته فرجی":   "1234",
+        "آرش پیریایی":  "1234",
+        "فرزین سوری":   "1234",
+        "احسان همایونی": "1234"
     }
 
     user_column_map = {
@@ -1441,10 +1438,9 @@ def main_page():
                     user_reasons.append(reason_val)
                 submit_pred_button = st.form_submit_button("ثبت پیش‌بینی‌ها")
                 if submit_pred_button:
-                    SCOPES_WRITE = ['https://www.googleapis.com/auth/spreadsheets']
-                    service_account_info_write = st.secrets["gcp_service_account"]
+                    SCOPES_WRITE = ["https://www.googleapis.com/auth/spreadsheets"]
                     creds_write = service_account.Credentials.from_service_account_info(
-                        service_account_info_write,
+                        st.secrets["gcp_service_account"],
                         scopes=SCOPES_WRITE
                     )
                     client_write = gspread.authorize(creds_write)
@@ -1499,6 +1495,192 @@ def main_page():
                     sheet_write.clear()
                     sheet_write.update("A1", data_to_write)
                     st.success("پیش‌بینی شما با موفقیت ثبت شد.")
+        # ---------------------------------------------------------------------
+    # Expert performance table (Sheet2) — with horizon errors & new scoring
+    # ---------------------------------------------------------------------
+    st.write("---")
+    st.subheader("عملکرد پیش‌بینی‌کنندگان")
+
+    # 1) Load Sheet2 from local JSON key
+        # Load Sheet2 via service account info from st.secrets
+    creds_perf = service_account.Credentials.from_service_account_info(
+        st.secrets["gcp_service_account"],
+        scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
+    )
+    gc_perf = gspread.authorize(creds_perf)
+    perf_ws = gc_perf.open_by_key(
+        "1Pz_zyb7DAz6CnvFrqv77uBP2Z_L7OnjOZkW0dj3m3HY"
+    ).worksheet("Sheet2")
+    perf_df = pd.DataFrame(perf_ws.get_all_records())
+
+
+    # 2) Parse dates
+    perf_df["perf_date"] = pd.to_datetime(
+        perf_df["Date"], format="%m/%d/%Y", errors="coerce"
+    ).dt.date
+
+    # 3) Compute total_days (rows from row2 through today’s date)
+    if system_today in perf_df["perf_date"].values:
+        today_idx = perf_df.index[perf_df["perf_date"] == system_today][0]
+    else:
+        today_idx = len(perf_df) - 1
+    total_days = today_idx + 1
+
+    # 4) Expert → (mean-MSE col, count col, timing col, horizon-error cols)
+    experts = {
+        "محمدرضا ایدرم":   {
+            "mse":  "Idrom MSE error",
+            "cnt":  "Idrom count",
+            "tim":  "Idrom timing",
+            "err":  ["Idrom today error","Idrom tomorrow error",
+                     "Idrom 2days error","Idrom 3days error"]
+        },
+        "فرشته فرجی":     {
+            "mse":  "fereshteh MSE error",
+            "cnt":  "fereshteh count",
+            "tim":  "fereshteh timing",
+            "err":  ["fereshteh today error","fereshteh tomorrow error",
+                     "fereshteh 2days error","fereshteh 3days error"]
+        },
+        "آرش پیریایی":    {
+            "mse":  "arash MSE error",
+            "cnt":  "arash count",
+            "tim":  "arash timing",
+            "err":  ["arash today error","arash tomorrow error",
+                     "arash 2days error","arash 3days error"]
+        },
+        "فرزین سوری":     {
+            "mse":  "farzin MSE error",
+            "cnt":  "farzin count",
+            "tim":  "farzin timing",
+            "err":  ["farzin today error","farzin tomorrow error",
+                     "farzin 2days error","farzin 3days error"]
+        },
+        "احسان همایونی":  {
+            "mse":  "ehsan MSE error",
+            "cnt":  "ehsan count",
+            "tim":  "ehsan timing",
+            "err":  ["ehsan today error","ehsan tomorrow error",
+                     "ehsan 2days error","ehsan 3days error"]
+        },
+        "امیرحسین محتشم": {
+            "mse":  "mohtasham MSE error",
+            "cnt":  "mohtasham count",
+            "tim":  "mohtasham timing",
+            "err":  ["mohtasham today error","mohtasham tomorrow error",
+                     "mohtasham 2days error","mohtasham 3days error"]
+        }
+    }
+
+    # 5) Build raw metrics
+    recs = []
+    mask_today = perf_df["perf_date"] == system_today
+    for name, cfg in experts.items():
+        # mean MSE
+        mse_avg = pd.to_numeric(perf_df[cfg["mse"]], errors="coerce").mean()
+        # attendance up to today
+        attend = int(pd.to_numeric(
+            perf_df.loc[mask_today, cfg["cnt"]].squeeze(),
+            errors="coerce"
+        ) or 0) if mask_today.any() else 0
+        pct = attend / total_days if total_days>0 else 0.0
+        # mean timing
+        timing_avg = pd.to_numeric(perf_df[cfg["tim"]], errors="coerce").mean()
+
+        # horizon MSEs (mean of squared errors up to each horizon date)
+        errs = []
+        for i, col in enumerate(cfg["err"]):
+            target_date = system_today - datetime.timedelta(days=(i+1))
+            sub = perf_df.loc[perf_df["perf_date"] <= target_date, col]
+            sq = pd.to_numeric(sub, errors="coerce")**2
+            errs.append(np.sqrt(sq.mean()))
+
+        recs.append({
+            "نام": name,
+            "میانگین خطای پیش‌بینی": mse_avg,
+            "خطای پیش‌بینی همان روز": errs[0],
+            "خطای پیش‌بینی فردا":    errs[1],
+            "خطای پیش‌بینی پسفردا":  errs[2],
+            "خطای پیش‌بینی 3 روز":   errs[3],
+            "تعداد روزهای مشارکت":      attend,
+            "درصد مشارکت":             pct,
+            "میانگین سرعت پیش‌بینی":   timing_avg
+        })
+
+    perf = pd.DataFrame(recs)
+
+    # 6) Normalize & invert where lower is better
+    eps = 1e-6
+
+    def inv_norm(series):
+        mn, mx = series.min(), series.max()
+        return 1 - ((series - mn) / (mx - mn + eps))
+
+    
+    perf["_h0"] = inv_norm(perf["خطای پیش‌بینی همان روز"])
+    perf["_h1"] = inv_norm(perf["خطای پیش‌بینی فردا"])
+    perf["_h2"] = inv_norm(perf["خطای پیش‌بینی پسفردا"])
+    perf["_h3"] = inv_norm(perf["خطای پیش‌بینی 3 روز"])
+    perf["_p"]  = (perf["درصد مشارکت"] - perf["درصد مشارکت"].min()) / (
+                     perf["درصد مشارکت"].max() - perf["درصد مشارکت"].min() + eps
+                  )
+    # rank timing (1 = fastest), then normalize (faster → higher)
+    perf["رتبه سرعت پیش‌بینی"] = perf["میانگین سرعت پیش‌بینی"].rank(method="min")
+    perf["_r"] = inv_norm(perf["رتبه سرعت پیش‌بینی"])
+
+    # 7) final score (امتیاز نهایی)
+    perf["امتیاز نهایی"] = (
+        0.2 * perf["_h0"]
+      + 0.2 * perf["_h1"]
+      + 0.2 * perf["_h2"]
+      + 0.2 * perf["_h3"]
+      + 0.1 * perf["_p"]
+      + 0.1 * perf["_r"]
+    )
+
+    # format درصد مشارکت
+    perf["درصد مشارکت"] = (perf["درصد مشارکت"]*100).round(1).astype(str) + "%"
+
+    # 8) Select & sort columns
+    out = perf[[
+        "نام",
+        "خطای پیش‌بینی همان روز",
+        "خطای پیش‌بینی فردا",
+        "خطای پیش‌بینی پسفردا",
+        "خطای پیش‌بینی 3 روز",
+        "تعداد روزهای مشارکت",
+        "درصد مشارکت",
+        "رتبه سرعت پیش‌بینی",
+        "امتیاز نهایی"
+    ]].sort_values("امتیاز نهایی", ascending=False)
+    out_display = out.copy()
+
+    # Format prediction error columns to float with 1 decimal
+    for col in [
+        "خطای پیش‌بینی همان روز",
+        "خطای پیش‌بینی فردا",
+        "خطای پیش‌بینی پسفردا",
+        "خطای پیش‌بینی 3 روز"
+    ]:
+        out_display[col] = out_display[col].apply(lambda x: f"{x:.1f}" if pd.notnull(x) else "")
+
+    # Format "امتیاز نهایی" as a percentage with 0 decimals
+    out_display["امتیاز نهایی"] = out_display["امتیاز نهایی"].apply(
+        lambda x: f"{round(x * 100):d}%" if pd.notnull(x) else ""
+    )
+
+    # Format "رتبه سرعت پیش‌بینی" as integer
+    out_display["رتبه سرعت پیش‌بینی"] = out_display["رتبه سرعت پیش‌بینی"].apply(
+        lambda x: f"{int(round(x))}" if pd.notnull(x) else ""
+    )
+
+    # Optionally format "تعداد روزهای مشارکت" and "درصد مشارکت" as integers
+
+    # 9) Render RTL/Tahoma HTML table
+    st.markdown(
+        f'<div dir="rtl">{out_display.to_html(index=False, classes="stTable", border=0)}</div>',
+        unsafe_allow_html=True
+    )
 
 def main():
     st.set_page_config(page_title="داشبورد پیش‌بینی", page_icon="📈", layout="wide")
