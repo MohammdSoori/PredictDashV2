@@ -1466,6 +1466,9 @@ def main_page():
                         "Mohtasham today reason", "Mohtasham tomorrow reason", "Mohtasham 2days reason", "Mohtasham 3days reason",
                         "Farhad today", "Farhad tomorrow", "Farhad 2days", "Farhad 3days",
                         "Farhad today reason", "Farhad tomorrow reason", "Farhad 2days reason", "Farhad 3days reason",
+                        "System opt today","System opt tomorrow","System opt 2days","System opt 3days",
+                        "System prac today","System prac tomorrow","System prac 2days","System prac 3days",
+                        "System pes today","System pes tomorrow","System pes 2days","System pes 3days",
                         "Idrom Time", "Fereshteh Time", "Arash Time", "Farzin Time", "Ehsan Time","Mohtasham Time","Farhad Time"
                     ]
                     df_second = pd.DataFrame(all_records)
@@ -1493,6 +1496,21 @@ def main_page():
                     now_str = datetime.datetime.now().strftime("%H:%M:%S")
                     df_second.at[row_index, user_info["time_col"]] = now_str
                     df_second = df_second[full_cols]
+                    system_opt_cols = ["System opt today","System opt tomorrow","System opt 2days","System opt 3days"]
+                    system_prac_cols = ["System prac today","System prac tomorrow","System prac 2days","System prac 3days"]
+                    system_pes_cols  = ["System pes today","System pes tomorrow","System pes 2days","System pes 3days"]
+                    
+                    for i in range(4):
+                        # optimistic (خوشبینانه)
+                        if not df_second.at[row_index, system_opt_cols[i]]:
+                            df_second.at[row_index, system_opt_cols[i]] = day_results[i]["پیش‌بینی نهایی خوشبینانه"]
+                        # realistic (واقع‌بینانه)
+                        if not df_second.at[row_index, system_prac_cols[i]]:
+                            df_second.at[row_index, system_prac_cols[i]] = day_results[i]["پیش‌بینی نهایی واقع‌بینانه"]
+                        # pessimistic (بدبینانه)
+                        if not df_second.at[row_index, system_pes_cols[i]]:
+                            df_second.at[row_index, system_pes_cols[i]] = day_results[i]["پیش‌بینی نهایی بدبینانه"]
+
                     data_to_write = df_second.values.tolist()
                     data_to_write.insert(0, df_second.columns.tolist())
                     sheet_write.clear()
