@@ -1572,14 +1572,15 @@ def main_page():
             "tim":  "mohtasham timing",
             "err":  ["mohtasham today error","mohtasham tomorrow error",
                      "mohtasham 2days error","mohtasham 3days error"]
-        },
-         "فرهاد حیدری": {
-            "mse":  "farhad MSE error",
-            "cnt":  "farhad count",
-            "tim":  "farhad timing",
-            "err":  ["farhad today error","farhad tomorrow error",
-                     "farhad 2days error","farhad 3days error"]
         }
+        # ,
+        #  "فرهاد حیدری": {
+        #     "mse":  "farhad MSE error",
+        #     "cnt":  "farhad count",
+        #     "tim":  "farhad timing",
+        #     "err":  ["farhad today error","farhad tomorrow error",
+        #              "farhad 2days error","farhad 3days error"]
+        # }
     }
 
     # 5) Build raw metrics
