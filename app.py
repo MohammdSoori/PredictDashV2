@@ -1338,7 +1338,8 @@ def main_page():
                 f"مجموعه **{fa_name}** با پیش‌بینی **{int(round(show_val))}** خالی برای {label} بحرانی است. "
                 f"تعداد خالی فعلی این مجموعه، **{int(round(current_empties))}** است.\n"
             )
-    
+
+        
         final_text = "\n".join(lines)
         st.info(final_text)
 
@@ -1571,6 +1572,13 @@ def main_page():
             "tim":  "mohtasham timing",
             "err":  ["mohtasham today error","mohtasham tomorrow error",
                      "mohtasham 2days error","mohtasham 3days error"]
+        },
+         "فرهاد حیدری": {
+            "mse":  "farhad MSE error",
+            "cnt":  "farhad count",
+            "tim":  "farhad timing",
+            "err":  ["farhad today error","farhad tomorrow error",
+                     "farhad 2days error","farhad 3days error"]
         }
     }
 
