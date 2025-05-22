@@ -1698,7 +1698,7 @@ def main_page():
             margin:8px auto;
         ">
           <h4 style="text-align:center; margin-bottom:12px;">🌟 عملکرد شما</h4>
-          <div style="line-height:1.6; font-size:15px; color:#333;">
+          <div style="line-height:1.6; font-size:15px; color:#000;">
             <div>📅 همان روز: <strong>{mse0:.1f}</strong></div>
             <div>📅 فردا: <strong>{mse1:.1f}</strong></div>
             <div>📅 پس‌فردا: <strong>{mse2:.1f}</strong></div>
