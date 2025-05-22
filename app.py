@@ -1509,7 +1509,7 @@ def main_page():
                             df_second.at[row_index, system_prac_cols[i]] = str(day_results[i]["پیش‌بینی نهایی واقع‌بینانه"])
 
                         # pessimistic (بدبینانه)
-                        if df_second.at[row_index, system_pes_cols[i]] = "":
+                        if df_second.at[row_index, system_pes_cols[i]] == "":
                             df_second.at[row_index, system_pes_cols[i]] = day_results[i]["پیش‌بینی نهایی بدبینانه"]
 
                     data_to_write = df_second.values.tolist()
