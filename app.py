@@ -1525,8 +1525,6 @@ def main_page():
     # Expert performance table (Sheet2) — with horizon errors & new scoring
     # ---------------------------------------------------------------------
     st.write("---")
-    st.subheader("عملکرد پیش‌بینی‌کنندگان")
-
     # 1) Load Sheet2 from local JSON key
         # Load Sheet2 via service account info from st.secrets
     creds_perf = service_account.Credentials.from_service_account_info(
@@ -1675,46 +1673,37 @@ def main_page():
     # format درصد مشارکت
     perf["درصد مشارکت"] = (perf["درصد مشارکت"]*100).round(1).astype(str) + "%"
 
-    # 8) Select & sort columns
-    out = perf[[
-        "نام",
-        "خطای پیش‌بینی همان روز",
-        "خطای پیش‌بینی فردا",
-        "خطای پیش‌بینی پسفردا",
-        "خطای پیش‌بینی 3 روز",
-        "تعداد روزهای مشارکت",
-        "درصد مشارکت",
-        "رتبه سرعت پیش‌بینی",
-        "امتیاز نهایی"
-    ]].sort_values("امتیاز نهایی", ascending=False)
-    out_display = out.copy()
+       # ─── قهرمانان پیش‌بینی‌کنندگان ─────────────────────────────────────────
+    st.subheader("🏆 قهرمانان پیش‌بینی‌کنندگان")
 
-    # Format prediction error columns to float with 1 decimal
-    for col in [
-        "خطای پیش‌بینی همان روز",
-        "خطای پیش‌بینی فردا",
-        "خطای پیش‌بینی پسفردا",
-        "خطای پیش‌بینی 3 روز"
-    ]:
-        out_display[col] = out_display[col].apply(lambda x: f"{x:.1f}" if pd.notnull(x) else "")
+    # ۱) قهرمان هر horizon (کمترین خطا)
+    h0_champ = perf.loc[perf["خطای پیش‌بینی همان روز"].idxmin(), "نام"]
+    h1_champ = perf.loc[perf["خطای پیش‌بینی فردا"].idxmin(),    "نام"]
+    h2_champ = perf.loc[perf["خطای پیش‌بینی پسفردا"].idxmin(),  "نام"]
+    h3_champ = perf.loc[perf["خطای پیش‌بینی 3 روز"].idxmin(),   "نام"]
 
-    # Format "امتیاز نهایی" as a percentage with 0 decimals
-    out_display["امتیاز نهایی"] = out_display["امتیاز نهایی"].apply(
-        lambda x: f"{round(x * 100):d}%" if pd.notnull(x) else ""
-    )
+    # ۲) قهرمان مشارکت در پیش‌بینی (بیشترین تعداد روز)
+    part_champ  = perf.loc[perf["تعداد روزهای مشارکت"].idxmax(), "نام"]
 
-    # Format "رتبه سرعت پیش‌بینی" as integer
-    out_display["رتبه سرعت پیش‌بینی"] = out_display["رتبه سرعت پیش‌بینی"].apply(
-        lambda x: f"{int(round(x))}" if pd.notnull(x) else ""
-    )
+    # ۳) قهرمان سرعت پیش‌بینی (کمترین رتبه)
+    speed_champ = perf.loc[perf["رتبه سرعت پیش‌بینی"].idxmin(), "نام"]
 
-    # Optionally format "تعداد روزهای مشارکت" and "درصد مشارکت" as integers
+    # ۴) قهرمان کل (بالاترین امتیاز نهایی)
+    total_champ = perf.loc[perf["امتیاز نهایی"].idxmax(),      "نام"]
 
-    # 9) Render RTL/Tahoma HTML table
-    st.markdown(
-        f'<div dir="rtl">{out_display.to_html(index=False, classes="stTable", border=0)}</div>',
-        unsafe_allow_html=True
-    )
+    # نمایش رسمی قهرمانان
+    st.markdown(f"""
+    <div style="direction:rtl; font-family:Tahoma; font-size:18px; line-height:1.6;">
+    • 🥇 **قهرمان پیش‌بینی همان روز:** {h0_champ}  <br>
+    • 🥇 **قهرمان پیش‌بینی فردا:** {h1_champ}      <br>
+    • 🥇 **قهرمان پیش‌بینی پس‌فردا:** {h2_champ}    <br>
+    • 🥇 **قهرمان پیش‌بینی ۳ روز بعد:** {h3_champ} <br><br>
+
+    • 📊 **قهرمان مشارکت در پیش‌بینی:** {part_champ}  <br>
+    • ⏱️ **قهرمان سرعت پیش‌بینی:** {speed_champ}     <br>
+    • 🏆 **قهرمان کل:** {total_champ}                <br>
+    </div>
+    """, unsafe_allow_html=True)
 
 def main():
     st.set_page_config(page_title="داشبورد پیش‌بینی", page_icon="📈", layout="wide")
