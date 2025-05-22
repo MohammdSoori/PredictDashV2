@@ -1502,19 +1502,24 @@ def main_page():
                     
                     for i in range(4):
                         # optimistic (خوشبینانه)
-                        if not df_second.at[row_index, system_opt_cols[i]]:
+                        if df_second.at[row_index, system_opt_cols[i]] =="":
                             df_second.at[row_index, system_opt_cols[i]] = day_results[i]["پیش‌بینی نهایی خوشبینانه"]
                         # realistic (واقع‌بینانه)
-                        if not df_second.at[row_index, system_prac_cols[i]]:
-                            df_second.at[row_index, system_prac_cols[i]] = day_results[i]["پیش‌بینی نهایی واقع‌بینانه"]
+                        if df_second.at[row_index, system_prac_cols[i]] == "":
+                            df_second.at[row_index, system_prac_cols[i]] = str(day_results[i]["پیش‌بینی نهایی واقع‌بینانه"])
+
                         # pessimistic (بدبینانه)
-                        if not df_second.at[row_index, system_pes_cols[i]]:
+                        if df_second.at[row_index, system_pes_cols[i]] = "":
                             df_second.at[row_index, system_pes_cols[i]] = day_results[i]["پیش‌بینی نهایی بدبینانه"]
 
                     data_to_write = df_second.values.tolist()
                     data_to_write.insert(0, df_second.columns.tolist())
                     sheet_write.clear()
-                    sheet_write.update("A1", data_to_write)
+                    sheet_write.update(
+                        "A1",
+                        data_to_write,
+                        value_input_option="RAW"
+                    )
                     st.success("پیش‌بینی شما با موفقیت ثبت شد.")
         # ---------------------------------------------------------------------
     # Expert performance table (Sheet2) — with horizon errors & new scoring
