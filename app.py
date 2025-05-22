@@ -1683,7 +1683,7 @@ def main_page():
         mse2    = row["خطای پیش‌بینی پسفردا"]
         mse3    = row["خطای پیش‌بینی 3 روز"]
         part    = row["تعداد روزهای مشارکت"]
-        speed   = row["رتبه سرعت پیش‌بینی"]
+        speed   = int(row["رتبه سرعت پیش‌بینی"])
         total   = row["امتیاز نهایی"]
 
         # render your personal card
