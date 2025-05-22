@@ -1672,6 +1672,44 @@ def main_page():
 
     # format درصد مشارکت
     perf["درصد مشارکت"] = (perf["درصد مشارکت"]*100).round(1).astype(str) + "%"
+            # ─── عملکرد شما ──────────────────────────────────────────────────────
+    if st.session_state.get("logged_user"):
+        user = st.session_state.logged_user
+        row = perf[perf["نام"] == user].squeeze()
+
+        # extract
+        mse0    = row["خطای پیش‌بینی همان روز"]
+        mse1    = row["خطای پیش‌بینی فردا"]
+        mse2    = row["خطای پیش‌بینی پسفردا"]
+        mse3    = row["خطای پیش‌بینی 3 روز"]
+        part    = row["تعداد روزهای مشارکت"]
+        speed   = row["رتبه سرعت پیش‌بینی"]
+        total   = row["امتیاز نهایی"]
+
+        # render your personal card
+        st.markdown(f"""
+        <div style="
+            direction:rtl;
+            font-family:Tahoma, sans-serif;
+            background:#eef2f7;
+            padding:16px;
+            border-radius:8px;
+            max-width:360px;
+            margin:8px auto;
+        ">
+          <h4 style="text-align:center; margin-bottom:12px;">🌟 عملکرد شما</h4>
+          <div style="line-height:1.6; font-size:15px; color:#333;">
+            <div>📅 همان روز: <strong>{mse0:.1f}</strong></div>
+            <div>📅 فردا: <strong>{mse1:.1f}</strong></div>
+            <div>📅 پس‌فردا: <strong>{mse2:.1f}</strong></div>
+            <div>📅 ۳ روز بعد: <strong>{mse3:.1f}</strong></div>
+            <hr style="margin:8px 0; border-color:#ccc;" />
+            <div>📊 مشارکت: <strong>{part}</strong> روز</div>
+            <div>⏱️ سرعت: <strong>{speed}</strong></div>
+            <div>🏆 نمره کل: <strong>{round(total*100)}%</strong></div>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
 
        # ─── قهرمانان پیش‌بینی‌کنندگان ─────────────────────────────────────────
     st.subheader("🏆 قهرمانان پیش‌بینی")
