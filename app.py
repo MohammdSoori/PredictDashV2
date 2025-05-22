@@ -1697,8 +1697,8 @@ def main_page():
             max-width:360px;
             margin:8px auto;
         ">
-          <h4 style="text-align:center; margin-bottom:12px;">🌟 عملکرد شما</h4>
-          <div style="line-height:1.6; font-size:15px; color:#000;">
+          <h4 style="text-align:center; margin-bottom:12px; color:#000">🌟 عملکرد شما</h4>
+          <div style="line-height:1.6; font-size:15px; color:#333;">
             <div>📅 خطای پیش‌بینی همان روز: <strong>{mse0:.1f}</strong></div>
             <div>📅 خطای پیش‌بینی فردا: <strong>{mse1:.1f}</strong></div>
             <div>📅 خطای پیش‌بینی پس‌فردا: <strong>{mse2:.1f}</strong></div>
