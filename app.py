@@ -1699,13 +1699,13 @@ def main_page():
         ">
           <h4 style="text-align:center; margin-bottom:12px;">🌟 عملکرد شما</h4>
           <div style="line-height:1.6; font-size:15px; color:#000;">
-            <div>📅 همان روز: <strong>{mse0:.1f}</strong></div>
-            <div>📅 فردا: <strong>{mse1:.1f}</strong></div>
-            <div>📅 پس‌فردا: <strong>{mse2:.1f}</strong></div>
-            <div>📅 ۳ روز بعد: <strong>{mse3:.1f}</strong></div>
+            <div>📅 خطای پیش‌بینی همان روز: <strong>{mse0:.1f}</strong></div>
+            <div>📅 خطای پیش‌بینی فردا: <strong>{mse1:.1f}</strong></div>
+            <div>📅 خطای پیش‌بینی پس‌فردا: <strong>{mse2:.1f}</strong></div>
+            <div>📅 خطای پیش‌بینی 3 روز بعد: <strong>{mse3:.1f}</strong></div>
             <hr style="margin:8px 0; border-color:#ccc;" />
-            <div>📊 مشارکت: <strong>{part}</strong> روز</div>
-            <div>⏱️ سرعت: <strong>{speed}</strong></div>
+            <div>📊 تعداد روزهای مشارکت شما: <strong>{part}</strong> روز</div>
+            <div>⏱️ رتبه شما از نظر سرعت: <strong>{speed}</strong></div>
             <div>🏆 نمره کل: <strong>{round(total*100)}%</strong></div>
           </div>
         </div>
