@@ -1691,19 +1691,32 @@ def main_page():
     # ۴) قهرمان کل (بالاترین امتیاز نهایی)
     total_champ = perf.loc[perf["امتیاز نهایی"].idxmax(),      "نام"]
 
-    # نمایش رسمی قهرمانان
+    # ─── قهرمانان پیش‌بینی‌کنندگان ─────────────────────────────────────────
     st.markdown(f"""
-    <div style="direction:rtl; font-family:Tahoma; font-size:18px; line-height:1.6;">
-    • 🥇 **قهرمان پیش‌بینی همان روز:** {h0_champ}  <br>
-    • 🥇 **قهرمان پیش‌بینی فردا:** {h1_champ}      <br>
-    • 🥇 **قهرمان پیش‌بینی پس‌فردا:** {h2_champ}    <br>
-    • 🥇 **قهرمان پیش‌بینی ۳ روز بعد:** {h3_champ} <br><br>
-
-    • 📊 **قهرمان مشارکت در پیش‌بینی:** {part_champ}  <br>
-    • ⏱️ **قهرمان سرعت پیش‌بینی:** {speed_champ}     <br>
-    • 🏆 **قهرمان کل:** {total_champ}                <br>
+    <div style="
+        direction:rtl;
+        font-family:Tahoma, sans-serif;
+        color:#2c3e50;
+        background:#f0f4f8;
+        border-radius:10px;
+        padding:20px;
+        max-width:400px;
+        margin:0 auto;
+    ">
+      <h3 style="margin-bottom:16px; text-align:center;">🏆 قهرمانان پیش‌بینی‌کنندگان</h3>
+      <div style="line-height:1.8; font-size:16px;">
+        <div>🥇 <span style="font-weight:600;">پیش‌بینی همان روز:</span> <span style="font-size:1.1em;">{h0_champ}</span></div>
+        <div>🥇 <span style="font-weight:600;">پیش‌بینی فردا:</span> <span style="font-size:1.1em;">{h1_champ}</span></div>
+        <div>🥇 <span style="font-weight:600;">پیش‌بینی پس‌فردا:</span> <span style="font-size:1.1em;">{h2_champ}</span></div>
+        <div>🥇 <span style="font-weight:600;">پیش‌بینی ۳ روز بعد:</span> <span style="font-size:1.1em;">{h3_champ}</span></div>
+        <hr style="margin:16px 0; border-color:#d0d7de;" />
+        <div>📊 <span style="font-weight:600;">قهرمان مشارکت:</span> <span style="font-size:1.1em;">{part_champ}</span></div>
+        <div>⏱️ <span style="font-weight:600;">قهرمان سرعت:</span> <span style="font-size:1.1em;">{speed_champ}</span></div>
+        <div>🏅 <span style="font-weight:600;">قهرمان کل:</span> <span style="font-size:1.1em;">{total_champ}</span></div>
+      </div>
     </div>
     """, unsafe_allow_html=True)
+
 
 def main():
     st.set_page_config(page_title="داشبورد پیش‌بینی", page_icon="📈", layout="wide")
