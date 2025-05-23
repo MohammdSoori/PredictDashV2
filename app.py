@@ -1741,7 +1741,7 @@ def main_page():
         max-width:400px;
         margin:0 auto;
     ">
-      <h3 style="margin-bottom:16px; text-align:center;">🏆 برترین‌ها در هر رشته</h3>
+      <h3 style="margin-bottom:16px; text-align:center;">🏆 برترین‌های پیش‌بینی تا امروز</h3>
       <div style="line-height:1.8; font-size:16px;">
         <div>🥇 <span style="font-weight:600;">پیش‌بینی همان روز:</span> <span style="font-size:1.1em;">{h0_champ}</span></div>
         <div>🥇 <span style="font-weight:600;">پیش‌بینی فردا:</span> <span style="font-size:1.1em;">{h1_champ}</span></div>
