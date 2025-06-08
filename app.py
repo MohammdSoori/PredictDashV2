@@ -1523,30 +1523,41 @@ def main_page():
                     )
                     st.success("پیش‌بینی شما با موفقیت ثبت شد.")
         # ---------------------------------------------------------------------
-   # ---------------------------------------------------------------------
-    # Expert performance table (Sheet1+Sheet2) — new ±2/-1 override metric
-    # ---------------------------------------------------------------------
-    # ---------------------------------------------------------------------
-    # Expert performance table (Sheet1+Sheet2) — new directional scoring
+    
+    # Expert performance table (Sheet1+Sheet2) — directional override metric
     # ---------------------------------------------------------------------
     st.write("---")
     
-    # ==========  تنظیمات و کمکی‌ها  ======================================
-    COLOR_NAME_FA = {0:"آبی", 1:"سبز", 2:"زرد", 3:"قرمز", 4:"مشکی"}
-    def color_name(idx:int) -> str: return COLOR_NAME_FA.get(int(idx),"نامعلوم")
+    # 1) Load both sheets --------------------------------------------------
+    creds = service_account.Credentials.from_service_account_info(
+        st.secrets["gcp_service_account"],
+        scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
+    )
+    gc = gspread.authorize(creds)
     
-    def reward_val(c_sys, c_exp, c_act):
-        """+1 اگر کارشناس به actual نزدیک‌تر شد؛ -1 اگر دورتر؛ 0 اگر override نیست."""
-        if c_exp == c_sys:           # no override
-            return 0
-        return 1 if abs(c_exp-c_act) < abs(c_sys-c_act) else -1
+    df_pred = pd.DataFrame(
+        gc.open_by_key("1Pz_zyb7DAz6CnvFrqv77uBP2Z_L7OnjOZkW0dj3m3HY")
+          .worksheet("Sheet1").get_all_records()
+    )
+    df_perf = pd.DataFrame(
+        gc.open_by_key("1Pz_zyb7DAz6CnvFrqv77uBP2Z_L7OnjOZkW0dj3m3HY")
+          .worksheet("Sheet2").get_all_records()
+    )
     
-    # ----------  داده‌های دو شیت (قبلاً لود شده‌اند)  --------------------
-    # df_pred : Sheet1  |  df_perf : Sheet2   (دارای actual_map, system_today …)
+    # 2) Dates & helpers ---------------------------------------------------
+    df_pred["pred_date"] = pd.to_datetime(df_pred["Date"], errors="coerce").dt.date
+    df_perf["perf_date"] = pd.to_datetime(df_perf["Date"], errors="coerce").dt.date
+    actual_map = dict(zip(df_perf["perf_date"],
+                          pd.to_numeric(df_perf["Actual"], errors="coerce")))
     
-    # ----------  ستون‌های مربوط به هر کارشناس  ---------------------------
-    HORIZONS = ["today","tomorrow","2days","3days"]
+    system_today = datetime.datetime.now(tehran_tz).date()
+    total_pred_rows = df_pred["pred_date"].notna().sum()           # ثابت برای همه
+    eps = 1e-6
+    
+    # 3) Column maps -------------------------------------------------------
+    HORIZONS = ["today", "tomorrow", "2days", "3days"]
     SYS_COLS = [f"System prac {h}" for h in HORIZONS]
+    
     expert_cols = {
         "محمدرضا ایدرم":   [f"idrom {h}"     for h in HORIZONS],
         "فرشته فرجی":      [f"fereshteh {h}" for h in HORIZONS],
@@ -1556,48 +1567,63 @@ def main_page():
         "امیرحسین محتشم":  [f"Mohtasham {h}" for h in HORIZONS],
         "فرهاد حیدری":     [f"Farhad {h}"    for h in HORIZONS],
     }
-    count_cols  = {"محمدرضا ایدرم":"Idrom count","فرشته فرجی":"fereshteh count",
-                   "آرش پیریایی":"arash count","فرزین سوری":"farzin count",
-                   "احسان همایونی":"ehsan count","امیرحسین محتشم":"mohtasham count",
-                   "فرهاد حیدری":"farhad count"}
-    timing_cols = {"محمدرضا ایدرم":"Idrom timing","فرشته فرجی":"fereshteh timing",
-                   "آرش پیریایی":"arash timing","فرزین سوری":"farzin timing",
-                   "احسان همایونی":"ehsan timing","امیرحسین محتشم":"mohtasham timing",
-                   "فرهاد حیدری":"farhad timing"}
     
-    # ----------  تابع امتیاز هر افق/کارشناس  -----------------------------
-    def horizon_stats(name:str, h_idx:int):
-        col_exp, col_sys  = expert_cols[name][h_idx], SYS_COLS[h_idx]
-        lag_req           = h_idx + 1
+    count_cols = {
+        "محمدرضا ایدرم":"Idrom count","فرشته فرجی":"fereshteh count","آرش پیریایی":"arash count",
+        "فرزین سوری":"farzin count","احسان همایونی":"ehsan count","امیرحسین محتشم":"mohtasham count",
+        "فرهاد حیدری":"farhad count",
+    }
+    timing_cols = {
+        "محمدرضا ایدرم":"Idrom timing","فرشته فرجی":"fereshteh timing","آرش پیریایی":"arash timing",
+        "فرزین سوری":"farzin timing","احسان همایونی":"ehsan timing","امیرحسین محتشم":"mohtasham timing",
+        "فرهاد حیدری":"farhad timing",
+    }
+    
+    # 4) colour utils ------------------------------------------------------
+    COLOR_NAME_FA = {0:"آبی",1:"سبز",2:"زرد",3:"قرمز",4:"مشکی"}
+    def colour_of(v):
+        try: return fuzz_color(float(v), total=330)
+        except: return 4
+    def color_name(i:int)->str: return COLOR_NAME_FA.get(int(i),"نامعلوم")
+    
+    # 5) reward per row (+1 / -1 / 0) -------------------------------------
+    def row_reward(c_sys, c_exp, c_act):
+        if c_exp == c_sys:
+            return 0
+        return 1 if abs(c_exp - c_act) < abs(c_sys - c_act) else -1
+    
+    # 6) horizon stats function -------------------------------------------
+    def horizon_stats(name:str, h:int):
+        col_exp, col_sys = expert_cols[name][h], SYS_COLS[h]
+        lag_req = h + 1
+    
         sub = df_pred[
             df_pred["pred_date"] + datetime.timedelta(days=lag_req) <= system_today
         ].copy()
     
-        # الحاق actual مربوط به روز هدف
-        sub["target_date"] = sub["pred_date"] + pd.to_timedelta(h_idx, unit="D")
+        sub["target_date"] = sub["pred_date"] + pd.to_timedelta(h, unit="D")
         sub["actual"]      = sub["target_date"].map(actual_map)
         sub["exp"]         = pd.to_numeric(sub[col_exp], errors="coerce")
         sub["sys"]         = pd.to_numeric(sub[col_sys], errors="coerce")
-    
         sub = sub.dropna(subset=["actual","exp","sys"])
         if sub.empty:
-            return dict(days=0, override=0, correct=0, wrong=0,
-                        fuzzy=None, mse=None, final=0.0)
+            return dict(days=0,override=0,correct=0,wrong=0,fuzzy=4,mse=None,final=0.0)
     
-        # رنگ‌ها
         c_act = sub["actual"].map(colour_of)
         c_exp = sub["exp"].map(colour_of)
         c_sys = sub["sys"].map(colour_of)
     
-        # محاسبه reward + آمار
-        rewards = [reward_val(s,e,a) for s,e,a in zip(c_sys,c_exp,c_act)]
+        rewards = [row_reward(s,e,a) for s,e,a in zip(c_sys,c_exp,c_act)]
         override_mask = [r!=0 for r in rewards]
         correct_mask  = [r==1 for r in rewards]
         wrong_mask    = [r==-1 for r in rewards]
     
+        override_score = sum(rewards) / total_pred_rows
         fuzzy_err = (c_exp - c_act).abs().mean()
-        mse_err   = ((sub["exp"] - sub["actual"])**2).mean()
-        final_score = (sum(rewards) / len(sub)) * (4 - fuzzy_err)
+    
+        final_score = override_score * (4 - fuzzy_err)
+    
+        mse_err = ((sub["exp"] - sub["actual"])**2).mean()
     
         return dict(days=len(sub),
                     override=int(sum(override_mask)),
@@ -1607,13 +1633,14 @@ def main_page():
                     mse=round(float(mse_err),3),
                     final=round(float(final_score),4))
     
-    # ----------  ساخت جدول عملکرد Summary  -------------------------------
+    # 7) build performance summary ----------------------------------------
     records=[]
     for name in expert_cols:
         stats=[horizon_stats(name,i) for i in range(4)]
-        attend=int(df_perf.loc[df_perf["perf_date"]==system_today,
-                               count_cols[name]].squeeze() or 0) \
-               if system_today in df_perf["perf_date"].values else 0
+    
+        attend=int(pd.to_numeric(
+            df_perf.loc[df_perf["perf_date"]==system_today, count_cols[name]].squeeze(),
+            errors="coerce") or 0) if system_today in df_perf["perf_date"].values else 0
         pct=attend/((df_perf["perf_date"]<=system_today).sum()) if df_perf.shape[0] else 0
         timing=pd.to_numeric(df_perf[timing_cols[name]],errors="coerce").mean()
     
@@ -1629,8 +1656,7 @@ def main_page():
         })
     perf=pd.DataFrame(records)
     
-    # ----------  نمره نهایی (همان وزن‌گذاری) ------------------------------
-    eps=1e-6
+    # 8) composite score ---------------------------------------------------
     norm=lambda s:(s-s.min())/(s.max()-s.min()+eps)
     perf["_h0"]=norm(perf["امتیاز همان روز"])
     perf["_h1"]=norm(perf["امتیاز فردا"])
@@ -1699,53 +1725,82 @@ def main_page():
     if "admin_unlocked" not in st.session_state:
         st.session_state["admin_unlocked"]=False
     
+    def admin_summary_df(h:int)->pd.DataFrame:
+        rows=[]
+        for ex in expert_cols:
+            st_h=horizon_stats(ex,h)
+            rows.append({"کارشناس":ex,"تعداد روز":st_h["days"],
+                         "Override":st_h["override"],"Correct":st_h["correct"],
+                         "Wrong":st_h["wrong"],"FuzzyErr":st_h["fuzzy"],
+                         "MSE":st_h["mse"],"FinalScore":st_h["final"]})
+        return pd.DataFrame(rows).sort_values("FinalScore",ascending=False)
+    
+    def admin_detail_df(expert:str,h:int)->pd.DataFrame:
+        col_exp,col_sys=expert_cols[expert][h],SYS_COLS[h]
+        lag_req=h+1
+        sub=df_pred[
+            df_pred["pred_date"]+datetime.timedelta(days=lag_req)<=system_today
+        ].copy()
+        sub["target"]=sub["pred_date"]+pd.to_timedelta(h,unit="D")
+        sub["actual"]=sub["target"].map(actual_map)
+        sub["exp"]=pd.to_numeric(sub[col_exp],errors="coerce")
+        sub["sys"]=pd.to_numeric(sub[col_sys],errors="coerce")
+        sub=sub.dropna(subset=["actual","exp","sys"])
+        if sub.empty: return pd.DataFrame()
+    
+        c_act=sub["actual"].map(colour_of)
+        c_exp=sub["exp"].map(colour_of)
+        c_sys=sub["sys"].map(colour_of)
+        mask=c_exp!=c_sys
+        sub=sub[mask].copy()
+        if sub.empty: return pd.DataFrame()
+    
+        sub["رنگ کارشناس"]=c_exp[mask].map(color_name)
+        sub["رنگ سیستم"]=c_sys[mask].map(color_name)
+        sub["رنگ واقعی"]=c_act[mask].map(color_name)
+        sub["درست؟"]=(abs(c_exp-c_act)<abs(c_sys-c_act)).map({True:"✅",False:"❌"})
+        return sub.rename(columns={
+            "pred_date":"تاریخ ثبت پیش‌بینی",
+            "target":"تاریخ هدف",
+            "exp":"پیش‌بینی کارشناس",
+            "sys":"پیش‌بینی سیستم",
+            "actual":"عدد واقعی"
+        })[
+            ["تاریخ ثبت پیش‌بینی","تاریخ هدف","پیش‌بینی کارشناس","پیش‌بینی سیستم",
+             "عدد واقعی","رنگ کارشناس","رنگ سیستم","رنگ واقعی","درست؟"]
+        ]
+    
     with st.expander("🛠️ جدول تحلیل ادمین (کلیک کنید)",
                      expanded=st.session_state["admin_unlocked"]):
     
-        # فرم ورود
         if not st.session_state["admin_unlocked"]:
-            pw=st.text_input("رمز عبور:",type="password",key="adm_pw")
-            if st.button("تأیید",key="adm_login") and pw=="1234":
+            pw=st.text_input("رمز عبور:",type="password")
+            if st.button("تأیید") and pw=="1234":
                 st.session_state["admin_unlocked"]=True
-            elif st.button("تأیید",key="adm_login_wrong") and pw!="1234":
+            elif st.button("تأیید") and pw!="1234":
                 st.error("رمز نادرست است!")
     
-        # محتوا پس از ورود
         if st.session_state["admin_unlocked"]:
-            if st.button("خروج",key="adm_logout"):
+            if st.button("خروج"):
                 st.session_state["admin_unlocked"]=False
     
-            # -------- خلاصه تب‌ها --------
-            def _summary(h_idx:int):
-                col_sys, lag_req = SYS_COLS[h_idx], h_idx+1
-                rows=[]
-                for ex in expert_cols:
-                    data=horizon_stats(ex,h_idx)
-                    rows.append({"کارشناس":ex,"تعداد روز":data["days"],
-                                 "Override":data["override"],"Correct":data["correct"],
-                                 "Wrong":data["wrong"],"FuzzyErr":data["fuzzy"],
-                                 "MSE":data["mse"],"FinalScore":data["final"]})
-                return pd.DataFrame(rows).sort_values("FinalScore",ascending=False)
-    
+            # summary tabs
             tabs=st.tabs(["امروز","فردا","۲ روز بعد","۳ روز بعد"])
-            for i,tab in enumerate(tabs):
-                with tab:
-                    st.dataframe(_summary(i),use_container_width=True)
+            for i,tb in enumerate(tabs):
+                with tb:
+                    st.dataframe(admin_summary_df(i),use_container_width=True)
     
             st.markdown("---")
-    
-            # -------- جزئیات اورراید --------
+            # detail panel
             st.markdown("### جزئیات اوررایدها")
-            col_h,col_e,col_btn=st.columns([1,2,1])
+            col_h,col_e,col_b=st.columns([1,2,1])
             map_h={"امروز":0,"فردا":1,"۲ روز بعد":2,"۳ روز بعد":3}
-            sel_h=col_h.selectbox("افق:",list(map_h.keys()),key="det_h")
-            sel_exp=col_e.selectbox("کارشناس:",list(expert_cols.keys()),key="det_exp")
-            if col_btn.button("نمایش",key="det_show"):
-                det_df=_detail_override_rows(sel_exp,map_h[sel_h])
-                if det_df.empty:
-                    st.info("هیچ اوررایدی برای این ترکیب یافت نشد.")
-                else:
-                    st.dataframe(det_df,use_container_width=True)
+            sel_h=col_h.selectbox("افق:",list(map_h.keys()))
+            sel_exp=col_e.selectbox("کارشناس:",list(expert_cols.keys()))
+            if col_b.button("نمایش"):
+                ddf=admin_detail_df(sel_exp,map_h[sel_h])
+                st.dataframe(ddf if not ddf.empty else pd.DataFrame(
+                    {"پیام":["هیچ اوررایدی یافت نشد."]}),use_container_width=True)
 
 def main():
         st.set_page_config(page_title="داشبورد پیش‌بینی", page_icon="📈", layout="wide")
