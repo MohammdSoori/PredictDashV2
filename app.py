@@ -1715,11 +1715,17 @@ def main_page():
     """, unsafe_allow_html=True)
 
 
+        # ──────────────────────────────────────────────────────────────────────
     #                       🔐 ماژول تحلیل ادمین
     # ──────────────────────────────────────────────────────────────────────
     import functools
+    import streamlit as _st  # برای st.experimental_rerun
     
-    # ── Helper: جدول خلاصه برای یک افق ────────────────────────────────────
+    # ── 0) State flag -----------------------------------------------------
+    if "admin_unlocked" not in st.session_state:
+        st.session_state["admin_unlocked"] = False
+    
+    # ── Helpers (بدون تغییر) ---------------------------------------------
     def _admin_stats_for_horizon(h_idx: int) -> pd.DataFrame:
         hlabel, col_sys, lag_req = HORIZONS[h_idx], SYS_COLS[h_idx], h_idx+1
         rows = []
@@ -1728,7 +1734,6 @@ def main_page():
             sub = df_pred[
                 df_pred["pred_date"] + datetime.timedelta(days=lag_req) <= system_today
             ].copy()
-    
             sub["target_date"] = sub["pred_date"] + pd.to_timedelta(h_idx, unit="D")
             sub["actual"]      = sub["target_date"].map(actual_map)
             sub["exp"]         = pd.to_numeric(sub[col_exp], errors="coerce")
@@ -1756,24 +1761,20 @@ def main_page():
                          "Correct":int(cor.sum()),"Wrong":int(wr.sum()),
                          "FuzzyErr":round(float(fuzzy),3),"MSE":round(float(mse),3),
                          "FinalScore":round(float(reward),4)})
-        df = pd.DataFrame(rows).sort_values("FinalScore",ascending=False).reset_index(drop=True)
-        return df
+        return pd.DataFrame(rows).sort_values("FinalScore",ascending=False).reset_index(drop=True)
     
-    # ── Helper: جزئیات یک کارشناس/افق ─────────────────────────────────────
     def _detail_override_rows(expert: str, h_idx: int) -> pd.DataFrame:
         col_exp, col_sys, lag_req = expert_cols[expert][h_idx], SYS_COLS[h_idx], h_idx+1
         sub = df_pred[
             df_pred["pred_date"] + datetime.timedelta(days=lag_req) <= system_today
         ].copy()
-    
         sub["target_date"] = sub["pred_date"] + pd.to_timedelta(h_idx, unit="D")
         sub["actual"]      = sub["target_date"].map(actual_map)
         sub["exp"]         = pd.to_numeric(sub[col_exp], errors="coerce")
         sub["sys"]         = pd.to_numeric(sub[col_sys], errors="coerce")
         sub = sub.dropna(subset=["actual","exp","sys"])
-    
         if sub.empty:
-            return pd.DataFrame()   # خالی
+            return pd.DataFrame()
     
         c_act = sub["actual"].map(colour_of)
         c_exp = sub["exp"].map(colour_of)
@@ -1801,39 +1802,51 @@ def main_page():
              "رنگ کارشناس","رنگ سیستم","رنگ واقعی","درست؟"]
         ].sort_values("تاریخ ثبت پیش‌بینی")
     
-    # ─── UI ───────────────────────────────────────────────────────────────
-    with st.expander("🛠️ جدول تحلیل ادمین (کلیک کنید)", expanded=False):
-        col_pw, col_btn = st.columns([2,1])
-        admin_pw  = col_pw.text_input("رمز عبور:", type="password", key="admin_pw")
-        auth_btn  = col_btn.button("تأیید", key="admin_btn")
+    # ── 1) UI ─────────────────────────────────────────────────────────────
+    with st.expander("🛠️ جدول تحلیل ادمین (کلیک کنید)",
+                     expanded=st.session_state["admin_unlocked"]):
     
-        if auth_btn and admin_pw != "1234":
-            st.error("رمز نادرست است!")
+        # 🔒 اگر هنوز لاگین نشده: فرم رمز
+        if not st.session_state["admin_unlocked"]:
+            col_pw, col_btn = st.columns([2,1])
+            admin_pw = col_pw.text_input("رمز عبور:", type="password", key="admin_pw")
+            if col_btn.button("تأیید", key="admin_btn"):
+                if admin_pw == "1234":
+                    st.session_state["admin_unlocked"] = True
+                    _st.experimental_rerun()   # فوراً رفرش تا بخش باز شود
+                else:
+                    st.error("رمز نادرست است!")
     
-        if auth_btn and admin_pw == "1234":
-            st.success("ورود موفق! جداول در دسترس هستند.")
+        # 🔓 پس از لاگین: جداول و جزئیات
+        if st.session_state["admin_unlocked"]:
     
-            # ---- تب‌های خلاصه ---------------------------------------------------
+            if st.button("خروج", key="admin_logout"):
+                st.session_state["admin_unlocked"] = False
+                _st.experimental_rerun()
+    
+            # --- تب‌های خلاصه --------------------------------------------
             tabs = st.tabs(["امروز","فردا","۲ روز بعد","۳ روز بعد"])
             for i, tb in enumerate(tabs):
                 with tb:
-                    st.markdown(f"### جدول خلاصه پیش‌بینی «{HORIZONS[i]}»")
+                    st.markdown(f"### جدول خلاصه افق «{HORIZONS[i]}»")
                     st.dataframe(_admin_stats_for_horizon(i), use_container_width=True)
     
             st.markdown("---")
     
-            # ---- فرم جزئیات Overrides ------------------------------------------
+            # --- جزئیات اورراید ------------------------------------------
             st.markdown("### جزئیات اوررایدها")
-            col_hor, col_exp = st.columns(2)
-            hor_map_disp = {"امروز":0,"فردا":1,"۲ روز بعد":2,"۳ روز بعد":3}
-            sel_hor_str = col_hor.selectbox("انتخاب افق:", list(hor_map_disp.keys()))
-            sel_exp     = col_exp.selectbox("انتخاب کارشناس:", list(expert_cols.keys()))
-            if st.button("نمایش جزئیات", key="show_detail_btn"):
-                det_df = _detail_override_rows(sel_exp, hor_map_disp[sel_hor_str])
+            col_h, col_e, col_btn = st.columns([1,2,1])
+            hor_map = {"امروز":0,"فردا":1,"۲ روز بعد":2,"۳ روز بعد":3}
+            sel_hor_str = col_h.selectbox("افق:", list(hor_map.keys()), key="det_hor")
+            sel_exp     = col_e.selectbox("کارشناس:", list(expert_cols.keys()), key="det_exp")
+    
+            if col_btn.button("نمایش", key="show_det"):
+                det_df = _detail_override_rows(sel_exp, hor_map[sel_hor_str])
                 if det_df.empty:
                     st.info("هیچ اوررایدی برای این ترکیب یافت نشد.")
                 else:
                     st.dataframe(det_df, use_container_width=True)
+    
 
 def main():
         st.set_page_config(page_title="داشبورد پیش‌بینی", page_icon="📈", layout="wide")
