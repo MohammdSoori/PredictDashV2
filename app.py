@@ -1713,6 +1713,72 @@ def main_page():
       </div>
     </div>
     """, unsafe_allow_html=True)
+    # ──────────────────────────────────────────────────────────────────────
+    #                جدول تحلیل
+    # ──────────────────────────────────────────────────────────────────────
+    with st.expander("🛠️ جدول تحلیل ادمین ", expanded=False):
+        admin_pw = st.text_input("رمز عبور:", type="password", key="admin_pw")
+        if admin_pw == "1234":
+            # ----------   محاسبات تفصیلی   ----------
+            stat_rows = []
+            for name in expert_cols:
+                for h, hlabel in enumerate(HORIZONS):
+                    # همان توابعی که قبل ساختیم؛ این‌بار همه جزئیات را نگه می‌داریم
+                    col_exp, col_sys = expert_cols[name][h], SYS_COLS[h]
+                    lag_req = h + 1
+                    sub = df_pred[
+                        df_pred["pred_date"] + datetime.timedelta(days=lag_req) <= system_today
+                    ].copy()
+    
+                    if sub.empty:
+                        stat_rows.append({
+                            "کارشناس": name, "افق": hlabel, "Override": 0,
+                            "Correct": 0, "Wrong": 0, "FuzzyErr": None, "MSE": None
+                        })
+                        continue
+    
+                    sub["target_date"] = sub["pred_date"] + pd.to_timedelta(h, unit="D")
+                    sub["actual"]      = sub["target_date"].map(actual_map)
+                    sub["exp"]         = pd.to_numeric(sub[col_exp], errors="coerce")
+                    sub["sys"]         = pd.to_numeric(sub[col_sys], errors="coerce")
+    
+                    sub = sub.dropna(subset=["actual","exp","sys"])
+                    if sub.empty:
+                        stat_rows.append({
+                            "کارشناس": name, "افق": hlabel, "Override": 0,
+                            "Correct": 0, "Wrong": 0, "FuzzyErr": None, "MSE": None
+                        })
+                        continue
+    
+                    c_act = sub["actual"].map(colour_of)
+                    c_exp = sub["exp"].map(colour_of)
+                    c_sys = sub["sys"].map(colour_of)
+    
+                    overrides = c_exp != c_sys
+                    correct   = (overrides & (c_exp == c_act))
+                    wrong     = (overrides & (c_exp != c_act))
+    
+                    fuzzy_err = (c_exp - c_act).abs().mean()
+                    mse_err   = ((sub["exp"] - sub["actual"])**2).mean()
+    
+                    stat_rows.append({
+                        "کارشناس": name,
+                        "افق": hlabel,
+                        "Override": int(overrides.sum()),
+                        "Correct":  int(correct.sum()),
+                        "Wrong":    int(wrong.sum()),
+                        "FuzzyErr": round(float(fuzzy_err), 3),
+                        "MSE":      round(float(mse_err),   3)
+                    })
+    
+            stat_df = pd.DataFrame(stat_rows)
+            stat_df = stat_df[
+                ["کارشناس","افق","Override","Correct","Wrong","FuzzyErr","MSE"]
+            ].sort_values(["کارشناس","افق"])
+    
+            st.dataframe(stat_df, use_container_width=True)
+        elif admin_pw:
+            st.error("رمز اشتباه است!")
 
 def main():
         st.set_page_config(page_title="داشبورد پیش‌بینی", page_icon="📈", layout="wide")
