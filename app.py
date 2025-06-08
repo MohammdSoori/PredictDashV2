@@ -1630,51 +1630,35 @@ def main_page():
             "تعداد روزهای مشارکت":attend, "درصد مشارکت":pct,
             "میانگین سرعت پیش‌بینی":timing})
     perf=pd.DataFrame(records)
-    # ----------  build performance summary (+ save stats)  ---------------
-    records   = []
-    all_stats = {}              # ← اضافه شد
-    
-    for name in expert_cols:
-        stats = [horizon_stats(name, i) for i in range(4)]
-        all_stats[name] = stats          # ← ذخیره برای جدول تجمیعی
-    
-        attend = int(pd.to_numeric(
-            df_perf.loc[df_perf["perf_date"] == system_today, count_cols[name]].squeeze(),
-            errors="coerce") or 0) if system_today in df_perf["perf_date"].values else 0
-        pct    = attend / ((df_perf["perf_date"] <= system_today).sum()) if df_perf.shape[0] else 0
-        timing = pd.to_numeric(df_perf[timing_cols[name]], errors="coerce").mean()
-    
-        records.append({
-            "نام": name,
-            "امتیاز همان روز":   stats[0]["final"],
-            "امتیاز فردا":       stats[1]["final"],
-            "امتیاز پسفردا":     stats[2]["final"],
-            "امتیاز ۳ روز بعد":  stats[3]["final"],
-            "تعداد روزهای مشارکت": attend,
-            "درصد مشارکت":        pct,
-            "میانگین سرعت پیش‌بینی": timing
-        })
-    
-    perf = pd.DataFrame(records)
     # ---------------------------------------------------------------------
-    # 🔗 جدول جمع‌بندی چهار افق
+    # 📋 جدول جمع‌بندی کل افق‌های آینده (فردا تا ۳ روز بعد)  ─ بدون «امروز»
     # ---------------------------------------------------------------------
     agg_rows = []
-    for name, stat_list in all_stats.items():
+    
+    # all_stats ⇐ در حلقهٔ بالا ساخته شده و شامل 4 دیکشنری برای هر افق است
+    #   stat_list[0] → امروز   |   stat_list[1] → فردا   |   [2] → ۲ روز بعد   |   [3] → ۳ روز بعد
+    
+    for expert_name, stat_list in all_stats.items():
+        future_stats = stat_list[1:]        # فقط افق‌های 1,2,3
+    
         agg_rows.append({
-            "کارشناس":           name,
-            "Override":          sum(s["override"] for s in stat_list),
-            "Correct":           sum(s["correct"]  for s in stat_list),
-            "Wrong":             sum(s["wrong"]    for s in stat_list),
-            "FuzzyErr(AVG)":     round(np.mean([s["fuzzy"] for s in stat_list]), 3),
-            "MSE(AVG)":          round(np.nanmean([s["mse"]  for s in stat_list]), 3),
-            "FinalScore(AVG)":   round(np.mean([s["final"] for s in stat_list]), 4)
+            "کارشناس":          expert_name,
+            "Override":         sum(s["override"] for s in future_stats),
+            "Correct":          sum(s["correct"]  for s in future_stats),
+            "Wrong":            sum(s["wrong"]    for s in future_stats),
+            "FuzzyErr(AVG)":    round(np.mean([s["fuzzy"] for s in future_stats]), 3),
+            "MSE(AVG)":         round(np.nanmean([s["mse"]  for s in future_stats]), 3),
+            "FinalScore(AVG)":  round(np.mean([s["final"] for s in future_stats]), 4),
         })
     
-    agg_df = pd.DataFrame(agg_rows).sort_values("FinalScore(AVG)", ascending=False)
+    agg_df = (pd.DataFrame(agg_rows)
+              .sort_values("FinalScore(AVG)", ascending=False)
+              .reset_index(drop=True))
     
-    st.subheader("📋 جدول جمع‌بندی کل افق‌ها")
+    st.subheader("📋 جدول جمع‌بندی افق‌های آینده (فردا تا ۳ روز بعد)")
     st.dataframe(agg_df, use_container_width=True)
+    # ---------------------------------------------------------------------
+
     
 
     # 8) composite overall score ------------------------------------------
