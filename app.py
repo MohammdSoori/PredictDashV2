@@ -314,13 +314,13 @@ def read_main_dfs():
 
 def fuzz_color(value, total=330):
     occ = (total - value) / total
-    if occ >= 0.99:
+    if occ >= 0.98:
         return 0  # Blue
-    elif occ >= 0.96:
+    elif occ >= 0.94:
         return 1  # Green
-    elif occ >= 0.93:
-        return 2  # Yellow
     elif occ >= 0.90:
+        return 2  # Yellow
+    elif occ >= 0.86:
         return 3  # Red
     else:
         return 4  # Black
