@@ -1531,7 +1531,14 @@ def main_page():
     # ---------------------------------------------------------------------
     CAPACITY = 330                                   # fixed hotel-count baseline
     COLOR_NAMES = ["blue", "green", "yellow", "red", "black"]
-    
+    # -- create a fresh read-only gspread client (needed below) --------------------
+    SCOPES_READ = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+    creds_read  = service_account.Credentials.from_service_account_info(
+                     st.secrets["gcp_service_account"],
+                     scopes=SCOPES_READ
+             )
+    gc_perf     = gspread.authorize(creds_read)      # <-- this is what was missing
+
     def color_code(val: float, total: int = CAPACITY) -> int:
         """convert ‘empty-room’ count → 0..4 colour bucket (blue…black)"""
         return fuzz_color(val, total)
