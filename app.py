@@ -1714,21 +1714,17 @@ def main_page():
     </div>
     """, unsafe_allow_html=True)
 
-    # ──────────────────────────────────────────────────────────────────────
+
     #                       🔐 ماژول تحلیل ادمین
     # ──────────────────────────────────────────────────────────────────────
     import functools
     
+    # ── Helper: جدول خلاصه برای یک افق ────────────────────────────────────
     def _admin_stats_for_horizon(h_idx: int) -> pd.DataFrame:
-        """برمی‌گرداند DataFrame آمار تفصیلی برای افق h_idx (0..3)."""
-        hlabel   = HORIZONS[h_idx]
-        col_sys  = SYS_COLS[h_idx]
-    
-        rows_list = []
+        hlabel, col_sys, lag_req = HORIZONS[h_idx], SYS_COLS[h_idx], h_idx+1
+        rows = []
         for expert in expert_cols:
             col_exp = expert_cols[expert][h_idx]
-            lag_req = h_idx + 1
-    
             sub = df_pred[
                 df_pred["pred_date"] + datetime.timedelta(days=lag_req) <= system_today
             ].copy()
@@ -1740,64 +1736,104 @@ def main_page():
             sub = sub.dropna(subset=["actual","exp","sys"])
     
             if sub.empty:
-                rows_list.append({
-                    "کارشناس": expert, "تعداد روز": 0,
-                    "Override": 0, "Correct": 0, "Wrong": 0,
-                    "FuzzyErr": None, "MSE": None, "FinalScore": 0.0
-                })
+                rows.append({"کارشناس":expert,"تعداد روز":0,"Override":0,"Correct":0,
+                             "Wrong":0,"FuzzyErr":None,"MSE":None,"FinalScore":0.0})
                 continue
     
             c_act = sub["actual"].map(colour_of)
             c_exp = sub["exp"].map(colour_of)
             c_sys = sub["sys"].map(colour_of)
     
-            overrides = c_exp != c_sys
-            correct   = overrides & (c_exp == c_act)
-            wrong     = overrides & (c_exp != c_act)
+            ov  = c_exp != c_sys
+            cor = ov & (c_exp == c_act)
+            wr  = ov & (c_exp != c_act)
     
-            total_over = overrides.sum()
-            corr_over  = correct.sum()
-            wrong_over = wrong.sum()
+            fuzzy = (c_exp - c_act).abs().mean()
+            mse   = ((sub["exp"]-sub["actual"])**2).mean()
+            reward = ((cor)*2 + (wr)*(-1)).mean()
     
-            fuzzy_err  = (c_exp - c_act).abs().mean()
-            mse_err    = np.sqrt(((sub["exp"] - sub["actual"])**2).mean())
+            rows.append({"کارشناس":expert,"تعداد روز":len(sub),"Override":int(ov.sum()),
+                         "Correct":int(cor.sum()),"Wrong":int(wr.sum()),
+                         "FuzzyErr":round(float(fuzzy),3),"MSE":round(float(mse),3),
+                         "FinalScore":round(float(reward),4)})
+        df = pd.DataFrame(rows).sort_values("FinalScore",ascending=False).reset_index(drop=True)
+        return df
     
-            # +2 / -1 / 0 امتیاز روزانه
-            daily_reward = ((correct)*2 + (wrong)*(-1)).mean()
-            rows_list.append({
-                "کارشناس": expert,
-                "تعداد روز": int(len(sub)),
-                "Override": int(total_over),
-                "Correct":  int(corr_over),
-                "Wrong":    int(wrong_over),
-                "FuzzyErr": round(float(fuzzy_err), 3),
-                "MSE":      round(float(mse_err),   3),
-                "FinalScore": round(float(daily_reward), 4)
-            })
+    # ── Helper: جزئیات یک کارشناس/افق ─────────────────────────────────────
+    def _detail_override_rows(expert: str, h_idx: int) -> pd.DataFrame:
+        col_exp, col_sys, lag_req = expert_cols[expert][h_idx], SYS_COLS[h_idx], h_idx+1
+        sub = df_pred[
+            df_pred["pred_date"] + datetime.timedelta(days=lag_req) <= system_today
+        ].copy()
     
-        df_out = pd.DataFrame(rows_list)
-        df_out = df_out.sort_values("FinalScore", ascending=False).reset_index(drop=True)
-        return df_out
+        sub["target_date"] = sub["pred_date"] + pd.to_timedelta(h_idx, unit="D")
+        sub["actual"]      = sub["target_date"].map(actual_map)
+        sub["exp"]         = pd.to_numeric(sub[col_exp], errors="coerce")
+        sub["sys"]         = pd.to_numeric(sub[col_sys], errors="coerce")
+        sub = sub.dropna(subset=["actual","exp","sys"])
     
-    # ---------- UI  -------------------------------------------------------
+        if sub.empty:
+            return pd.DataFrame()   # خالی
+    
+        c_act = sub["actual"].map(colour_of)
+        c_exp = sub["exp"].map(colour_of)
+        c_sys = sub["sys"].map(colour_of)
+    
+        mask_ov = c_exp != c_sys
+        sub = sub[mask_ov].copy()
+        if sub.empty:
+            return pd.DataFrame()
+    
+        sub["رنگ کارشناس"] = c_exp[mask_ov]
+        sub["رنگ سیستم"]   = c_sys[mask_ov]
+        sub["رنگ واقعی"]   = c_act[mask_ov]
+        sub["درست؟"]       = (c_exp[mask_ov] == c_act[mask_ov]).map({True:"✅",False:"❌"})
+    
+        return sub.rename(columns={
+            "pred_date":"تاریخ ثبت پیش‌بینی",
+            "target_date":"تاریخ هدف",
+            "exp":"پیش‌بینی کارشناس",
+            "sys":"پیش‌بینی سیستم",
+            "actual":"عدد واقعی"
+        })[
+            ["تاریخ ثبت پیش‌بینی","تاریخ هدف","پیش‌بینی کارشناس",
+             "پیش‌بینی سیستم","عدد واقعی",
+             "رنگ کارشناس","رنگ سیستم","رنگ واقعی","درست؟"]
+        ].sort_values("تاریخ ثبت پیش‌بینی")
+    
+    # ─── UI ───────────────────────────────────────────────────────────────
     with st.expander("🛠️ جدول تحلیل ادمین (کلیک کنید)", expanded=False):
         col_pw, col_btn = st.columns([2,1])
-        admin_pw = col_pw.text_input("رمز عبور:", type="password", key="admin_pw")
-        show_btn = col_btn.button("تأیید", key="admin_btn")
+        admin_pw  = col_pw.text_input("رمز عبور:", type="password", key="admin_pw")
+        auth_btn  = col_btn.button("تأیید", key="admin_btn")
     
-        if show_btn and admin_pw != "1234":
+        if auth_btn and admin_pw != "1234":
             st.error("رمز نادرست است!")
     
-        if show_btn and admin_pw == "1234":
-            st.success("ورود موفق! جداول بارگذاری شد.")
-            horizon_tabs = st.tabs(["امروز", "فردا", "۲ روز بعد", "۳ روز بعد"])
-            for idx, tab in enumerate(horizon_tabs):
-                with tab:
-                    st.markdown(f"### جدول تحلیل افق «{HORIZONS[idx]}»")
-                    st.dataframe(
-                        _admin_stats_for_horizon(idx),
-                        use_container_width=True
-                    )
+        if auth_btn and admin_pw == "1234":
+            st.success("ورود موفق! جداول در دسترس هستند.")
+    
+            # ---- تب‌های خلاصه ---------------------------------------------------
+            tabs = st.tabs(["امروز","فردا","۲ روز بعد","۳ روز بعد"])
+            for i, tb in enumerate(tabs):
+                with tb:
+                    st.markdown(f"### جدول خلاصه پیش‌بینی «{HORIZONS[i]}»")
+                    st.dataframe(_admin_stats_for_horizon(i), use_container_width=True)
+    
+            st.markdown("---")
+    
+            # ---- فرم جزئیات Overrides ------------------------------------------
+            st.markdown("### جزئیات اوررایدها")
+            col_hor, col_exp = st.columns(2)
+            hor_map_disp = {"امروز":0,"فردا":1,"۲ روز بعد":2,"۳ روز بعد":3}
+            sel_hor_str = col_hor.selectbox("انتخاب افق:", list(hor_map_disp.keys()))
+            sel_exp     = col_exp.selectbox("انتخاب کارشناس:", list(expert_cols.keys()))
+            if st.button("نمایش جزئیات", key="show_detail_btn"):
+                det_df = _detail_override_rows(sel_exp, hor_map_disp[sel_hor_str])
+                if det_df.empty:
+                    st.info("هیچ اوررایدی برای این ترکیب یافت نشد.")
+                else:
+                    st.dataframe(det_df, use_container_width=True)
 
 def main():
         st.set_page_config(page_title="داشبورد پیش‌بینی", page_icon="📈", layout="wide")
