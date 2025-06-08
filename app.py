@@ -1715,20 +1715,24 @@ def main_page():
     """, unsafe_allow_html=True)
 
 
-        # ──────────────────────────────────────────────────────────────────────
-   # ──────────────────────────────────────────────────────────────────────
+    
     #                       🔐 ماژول تحلیل ادمین
     # ──────────────────────────────────────────────────────────────────────
     import functools
     
-    # ── session flag ------------------------------------------------------
+    # ── 0) رنگ‌ها به نام فارسی ───────────────────────────────────────────
+    COLOR_NAME_FA = {0: "آبی", 1: "سبز", 2: "زرد", 3: "قرمز", 4: "مشکی"}
+    def color_name(idx: int) -> str:          # 0‒4 → نام
+        return COLOR_NAME_FA.get(int(idx), "نامعلوم")
+    
+    # ── 1) وضعیت لاگین در سشن ────────────────────────────────────────────
     if "admin_unlocked" not in st.session_state:
         st.session_state["admin_unlocked"] = False
     
-    # ── helper: summary table per horizon ---------------------------------
+    # ── 2) جدول خلاصه برای یک افق ───────────────────────────────────────
     def _admin_stats_for_horizon(h_idx: int) -> pd.DataFrame:
         col_sys, lag_req = SYS_COLS[h_idx], h_idx + 1
-        rows = []
+        lst = []
         for expert in expert_cols:
             col_exp = expert_cols[expert][h_idx]
             sub = df_pred[
@@ -1742,29 +1746,33 @@ def main_page():
             sub = sub.dropna(subset=["actual","exp","sys"])
     
             if sub.empty:
-                rows.append({"کارشناس":expert,"تعداد روز":0,"Override":0,"Correct":0,
-                             "Wrong":0,"FuzzyErr":None,"MSE":None,"FinalScore":0.0})
+                lst.append({"کارشناس":expert,"تعداد روز":0,"Override":0,"Correct":0,
+                            "Wrong":0,"FuzzyErr":None,"MSE":None,"FinalScore":0.0})
                 continue
     
-            c_act = sub["actual"].map(colour_of)
-            c_exp = sub["exp"].map(colour_of)
-            c_sys = sub["sys"].map(colour_of)
+            c_act, c_exp, c_sys = (
+                sub["actual"].map(colour_of),
+                sub["exp"].map(colour_of),
+                sub["sys"].map(colour_of),
+            )
     
-            ov  = c_exp != c_sys
-            cor = ov & (c_exp == c_act)
-            wr  = ov & (c_exp != c_act)
+            ov   = c_exp != c_sys
+            corr = ov & (c_exp == c_act)
+            wr   = ov & (c_exp != c_act)
     
-            fuzzy  = (c_exp - c_act).abs().mean()
+            f_err  = (c_exp - c_act).abs().mean()
             mse    = ((sub["exp"] - sub["actual"])**2).mean()
-            reward = ((cor)*2 + (wr)*(-1)).mean()
+            reward = ((corr)*2 + (wr)*(-1)).mean()
     
-            rows.append({"کارشناس":expert,"تعداد روز":len(sub),"Override":int(ov.sum()),
-                         "Correct":int(cor.sum()),"Wrong":int(wr.sum()),
-                         "FuzzyErr":round(float(fuzzy),3),"MSE":round(float(mse),3),
-                         "FinalScore":round(float(reward),4)})
-        return pd.DataFrame(rows).sort_values("FinalScore",ascending=False).reset_index(drop=True)
+            lst.append({
+                "کارشناس":expert, "تعداد روز":len(sub),
+                "Override":int(ov.sum()), "Correct":int(corr.sum()), "Wrong":int(wr.sum()),
+                "FuzzyErr":round(float(f_err),3), "MSE":round(float(mse),3),
+                "FinalScore":round(float(reward),4)
+            })
+        return pd.DataFrame(lst).sort_values("FinalScore", ascending=False).reset_index(drop=True)
     
-    # ── helper: detailed override rows ------------------------------------
+    # ── 3) جدول جزئیات تمام اوررایدهای یک کارشناس/افق ───────────────────
     def _detail_override_rows(expert: str, h_idx: int) -> pd.DataFrame:
         col_exp, col_sys, lag_req = expert_cols[expert][h_idx], SYS_COLS[h_idx], h_idx+1
         sub = df_pred[
@@ -1776,7 +1784,6 @@ def main_page():
         sub["exp"]         = pd.to_numeric(sub[col_exp], errors="coerce")
         sub["sys"]         = pd.to_numeric(sub[col_sys], errors="coerce")
         sub = sub.dropna(subset=["actual","exp","sys"])
-    
         if sub.empty:
             return pd.DataFrame()
     
@@ -1789,9 +1796,9 @@ def main_page():
         if sub.empty:
             return pd.DataFrame()
     
-        sub["رنگ کارشناس"] = c_exp[mask_ov]
-        sub["رنگ سیستم"]   = c_sys[mask_ov]
-        sub["رنگ واقعی"]   = c_act[mask_ov]
+        sub["رنگ کارشناس"] = c_exp[mask_ov].map(color_name)
+        sub["رنگ سیستم"]   = c_sys[mask_ov].map(color_name)
+        sub["رنگ واقعی"]   = c_act[mask_ov].map(color_name)
         sub["درست؟"]       = (c_exp[mask_ov] == c_act[mask_ov]).map({True:"✅",False:"❌"})
     
         return sub.rename(columns={
@@ -1806,36 +1813,32 @@ def main_page():
              "رنگ کارشناس","رنگ سیستم","رنگ واقعی","درست؟"]
         ].sort_values("تاریخ ثبت پیش‌بینی")
     
-    # ── UI container ------------------------------------------------------
+    # ── 4) UI expander ───────────────────────────────────────────────────
     with st.expander("🛠️ جدول تحلیل ادمین (کلیک کنید)",
                      expanded=st.session_state["admin_unlocked"]):
     
-        # 🔒 login form
         if not st.session_state["admin_unlocked"]:
             col_pw, col_btn = st.columns([2,1])
-            password = col_pw.text_input("رمز عبور:", type="password", key="admin_pw")
-            if col_btn.button("تأیید", key="admin_btn"):
-                if password == "1234":
-                    st.session_state["admin_unlocked"] = True
-                else:
-                    st.error("رمز نادرست است!")
+            pw = col_pw.text_input("رمز عبور:", type="password", key="admin_pw")
+            if col_btn.button("تأیید", key="admin_btn") and pw == "1234":
+                st.session_state["admin_unlocked"] = True
+            elif col_btn.button("تأیید", key="admin_btn_wrong") and pw != "1234":
+                st.error("رمز نادرست است!")
     
-        # 🔓 admin content
         if st.session_state["admin_unlocked"]:
-    
             if st.button("خروج", key="admin_logout"):
                 st.session_state["admin_unlocked"] = False
     
-            # --- summary tabs --------------------------------------------------
+            # ----- خلاصه‌ها به‌صورت تب ----------------------------------------
             tabs = st.tabs(["امروز", "فردا", "۲ روز بعد", "۳ روز بعد"])
-            for idx, tb in enumerate(tabs):
+            for i, tb in enumerate(tabs):
                 with tb:
-                    st.markdown(f"### جدول خلاصه افق «{HORIZONS[idx]}»")
-                    st.dataframe(_admin_stats_for_horizon(idx), use_container_width=True)
+                    st.markdown(f"### جدول خلاصه افق «{HORIZONS[i]}»")
+                    st.dataframe(_admin_stats_for_horizon(i), use_container_width=True)
     
             st.markdown("---")
     
-            # --- detail viewer -------------------------------------------------
+            # ----- جزئیات اورراید --------------------------------------------
             st.markdown("### جزئیات اوررایدها")
             col_h, col_e, col_show = st.columns([1,2,1])
             horizon_map = {"امروز":0,"فردا":1,"۲ روز بعد":2,"۳ روز بعد":3}
