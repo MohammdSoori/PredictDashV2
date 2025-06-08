@@ -1523,51 +1523,35 @@ def main_page():
                     )
                     st.success("پیش‌بینی شما با موفقیت ثبت شد.")
         # ---------------------------------------------------------------------
-    # Expert performance table (Sheet2) — with horizon errors & new scoring
-    # ---------------------------------------------------------------------
-    # === NEW: colour bucket helpers (0-blue … 4-black) ===================
-    HORIZON_LABELS = ["today", "tomorrow", "2days", "3days"]
-    
-    def colour_of(value):
-        """Return 0-blue … 4-black using existing fuzz_color()."""
-        try:
-            v = float(value)
-        except:
-            return 4
-        return fuzz_color(v, total=330)
-
-
-    # ---------------------------------------------------------------------
-    # Expert performance table (Sheet2) — fuzzy-override scoring
-    # ---------------------------------------------------------------------
    # ---------------------------------------------------------------------
-    # Expert performance table (Sheet1+Sheet2) — fuzzy-override scoring
+    # Expert performance table (Sheet1+Sheet2) — new ±2/-1 override metric
     # ---------------------------------------------------------------------
     st.write("---")
     
-    # ── 1) Load both sheets (read-only) ───────────────────────────────────
-    creds_ro = service_account.Credentials.from_service_account_info(
+    # ── 1) Load sheets (read-only) ───────────────────────────────────────
+    creds = service_account.Credentials.from_service_account_info(
         st.secrets["gcp_service_account"],
         scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
     )
-    gc_ro = gspread.authorize(creds_ro)
+    gc = gspread.authorize(creds)
     
-    ws_pred = gc_ro.open_by_key("1Pz_zyb7DAz6CnvFrqv77uBP2Z_L7OnjOZkW0dj3m3HY")\
-                  .worksheet("Sheet1")
-    df_pred = pd.DataFrame(ws_pred.get_all_records())
+    df_pred = pd.DataFrame(
+        gc.open_by_key("1Pz_zyb7DAz6CnvFrqv77uBP2Z_L7OnjOZkW0dj3m3HY")
+          .worksheet("Sheet1").get_all_records()
+    )
+    df_perf = pd.DataFrame(
+        gc.open_by_key("1Pz_zyb7DAz6CnvFrqv77uBP2Z_L7OnjOZkW0dj3m3HY")
+          .worksheet("Sheet2").get_all_records()
+    )
     
-    ws_perf = gc_ro.open_by_key("1Pz_zyb7DAz6CnvFrqv77uBP2Z_L7OnjOZkW0dj3m3HY")\
-                  .worksheet("Sheet2")
-    df_perf = pd.DataFrame(ws_perf.get_all_records())
-    
-    # ── 2) Parse dates & helpers ─────────────────────────────────────────
+    # ── 2) Dates & helpers ───────────────────────────────────────────────
     df_pred["pred_date"] = pd.to_datetime(df_pred["Date"], errors="coerce").dt.date
     df_perf["perf_date"] = pd.to_datetime(df_perf["Date"], errors="coerce").dt.date
     actual_map = dict(zip(df_perf["perf_date"],
                           pd.to_numeric(df_perf["Actual"], errors="coerce")))
     
     system_today = datetime.datetime.now(tehran_tz).date()
-    total_days   = (df_perf["perf_date"] <= system_today).sum()   # for % participation
+    total_days   = (df_perf["perf_date"] <= system_today).sum()
     eps          = 1e-6
     
     # ── 3) Column maps ───────────────────────────────────────────────────
@@ -1595,52 +1579,52 @@ def main_page():
         "فرهاد حیدری":"farhad timing",
     }
     
-    # ── 4) Colour bucket util (0 blue … 4 black) ─────────────────────────
     def colour_of(v):
         try:
             x = float(v)
         except:
             return 4
-        return fuzz_color(x, total=330)
+        return fuzz_color(x, total=330)      # از قبل موجود است
     
-    # ── 5) Metrics for one expert & one horizon ──────────────────────────
-    def horizon_metrics(name, h):
-        col_exp = expert_cols[name][h]
-        col_sys = SYS_COLS[h]
-        lag_req = h + 1                                       # days to wait
+    # ── 4) Override-score (+2 / -1 / 0) برای یک افق و یک کارشناس ─────────
+    def override_score(name, h):
+        col_exp, col_sys = expert_cols[name][h], SYS_COLS[h]
+        lag_req = h + 1                                           # today→1 … 3days→4
     
-        # rows whose prediction date is old enough
-        mask_ok = df_pred["pred_date"] + datetime.timedelta(days=lag_req) <= system_today
-        if not mask_ok.any():
-            return 0.0, 4.0, 0.0
+        # only rows whose prediction date is old enough
+        valid_rows = df_pred[
+            df_pred["pred_date"] + datetime.timedelta(days=lag_req) <= system_today
+        ].copy()
+        if valid_rows.empty:
+            return 0.0
     
-        sub = df_pred[mask_ok].copy()
-        # look-up actual for calendar day (pred_date + h)
-        sub["target_date"] = sub["pred_date"] + pd.to_timedelta(h, unit="D")
-        sub["actual_val"]  = sub["target_date"].map(actual_map)
+        valid_rows["target_date"] = valid_rows["pred_date"] + pd.to_timedelta(h, unit="D")
+        valid_rows["actual"]      = valid_rows["target_date"].map(actual_map)
     
-        # drop rows where any piece is missing
-        sub = sub.dropna(subset=["actual_val", col_exp, col_sys])
-        if sub.empty:
-            return 0.0, 4.0, 0.0
+        # convert predictions → numeric, drop missing / blank / NaN
+        valid_rows["exp"] = pd.to_numeric(valid_rows[col_exp], errors="coerce")
+        valid_rows["sys"] = pd.to_numeric(valid_rows[col_sys], errors="coerce")
     
-        c_act = sub["actual_val"].map(colour_of)
-        c_exp = pd.to_numeric(sub[col_exp], errors="coerce").map(colour_of)
-        c_sys = pd.to_numeric(sub[col_sys], errors="coerce").map(colour_of)
+        mask = valid_rows[["actual","exp","sys"]].notna().all(axis=1)
+        rows = valid_rows[mask]
+        if rows.empty:
+            return 0.0
     
-        overrides      = c_exp != c_sys
-        total_ovr      = overrides.sum()
-        correct_ovr    = ((c_exp == c_act) & overrides).sum()
-        override_score = correct_ovr / total_ovr if total_ovr else 0.0
+        c_act = rows["actual"].map(colour_of)
+        c_exp = rows["exp"].map(colour_of)
+        c_sys = rows["sys"].map(colour_of)
     
-        fuzzy_err      = (c_exp - c_act).abs().mean()
-        final_score    = ((4 - fuzzy_err) * override_score) / 4    # 0–1 scale
-        return override_score, fuzzy_err, final_score
+        reward = (
+            ((c_exp == c_sys) * 0)                                 # no override
+          + ((c_exp != c_sys) & (c_exp == c_act)) * 2              # correct override
+          + ((c_exp != c_sys) & (c_exp != c_act)) * (-1)           # wrong override
+        )
+        return reward.mean()                                       # reward per day
     
-    # ── 6) Build summary DataFrame ───────────────────────────────────────
+    # ── 5) Summary table برای همه خبرگان ────────────────────────────────
     records = []
     for name in expert_cols:
-        fs = [horizon_metrics(name, h)[2] for h in range(4)]
+        scores = [override_score(name, h) for h in range(4)]
     
         attend = int(pd.to_numeric(
             df_perf.loc[df_perf["perf_date"] == system_today, count_cols[name]].squeeze(),
@@ -1651,10 +1635,10 @@ def main_page():
     
         records.append({
             "نام":                      name,
-            "امتیاز همان روز":          fs[0],
-            "امتیاز فردا":              fs[1],
-            "امتیاز پسفردا":            fs[2],
-            "امتیاز ۳ روز بعد":         fs[3],
+            "امتیاز همان روز":          scores[0],
+            "امتیاز فردا":              scores[1],
+            "امتیاز پسفردا":            scores[2],
+            "امتیاز ۳ روز بعد":         scores[3],
             "تعداد روزهای مشارکت":       attend,
             "درصد مشارکت":              pct_part,
             "میانگین سرعت پیش‌بینی":    timing
@@ -1662,7 +1646,7 @@ def main_page():
     
     perf = pd.DataFrame(records)
     
-    # ── 7) Final composite score  (unchanged weights) ────────────────────
+    # ── 6) Composite «امتیاز نهایی» (همان وزن‌بندی سابق) ────────────────
     def norm(s): return (s - s.min()) / (s.max() - s.min() + eps)
     
     perf["_h0"] = norm(perf["امتیاز همان روز"])
@@ -1672,16 +1656,16 @@ def main_page():
     perf["_p"]  = norm(perf["درصد مشارکت"])
     
     perf["رتبه سرعت پیش‌بینی"] = perf["میانگین سرعت پیش‌بینی"].rank(method="min")
-    perf["_r"] = norm(perf["رتبه سرعت پیش‌بینی"].max() - perf["رتبه سرعت پیش‌بینی"])
+    perf["_r"]  = norm(perf["رتبه سرعت پیش‌بینی"].max() - perf["رتبه سرعت پیش‌بینی"])
     
     perf["امتیاز نهایی"] = (
-          0.2*perf["_h0"] + 0.2*perf["_h1"]
-        + 0.2*perf["_h2"] + 0.2*perf["_h3"]
-        + 0.1*perf["_p"]  + 0.1*perf["_r"]
+          0.2*perf["_h0"] + 0.2*perf["_h1"] +
+          0.2*perf["_h2"] + 0.2*perf["_h3"] +
+          0.1*perf["_p"]  + 0.1*perf["_r"]
     )
     perf["درصد مشارکت"] = (perf["درصد مشارکت"]*100).round(1).astype(str) + "%"
     
-    # ── 8) ║ عملکرد شما ║ ────────────────────────────────────────────────
+    # ── 7) کارت «عملکرد شما» ─────────────────────────────────────────────
     if st.session_state.get("logged_user"):
         you = perf.loc[perf["نام"] == st.session_state.logged_user].squeeze()
         st.markdown(f"""
@@ -1701,7 +1685,7 @@ def main_page():
         </div>
         """, unsafe_allow_html=True)
     
-    # ── 9) ║ قهرمانان پیش‌بینی ║ ───────────────────────────────────────
+    # ── 8) قهرمانان پیش‌بینی ────────────────────────────────────────────
     st.subheader("🏆 قهرمانان پیش‌بینی")
     
     h0_champ = perf.loc[perf["امتیاز همان روز"].idxmax(),  "نام"]
@@ -1709,8 +1693,8 @@ def main_page():
     h2_champ = perf.loc[perf["امتیاز پسفردا"].idxmax(),    "نام"]
     h3_champ = perf.loc[perf["امتیاز ۳ روز بعد"].idxmax(), "نام"]
     
-    part_champ  = perf.loc[perf["تعداد روزهای مشارکت"].idxmax(), "نام"]
-    speed_champ = perf.loc[perf["رتبه سرعت پیش‌بینی"].idxmin(), "نام"]
+    part_champ  = perf.loc[perf["تعداد روزهای مشارکت"].idxmax(), "نام"]      # unchanged
+    speed_champ = perf.loc[perf["رتبه سرعت پیش‌بینی"].idxmin(), "نام"]      # unchanged
     total_champ = perf.loc[perf["امتیاز نهایی"].idxmax(),        "نام"]
     
     st.markdown(f"""
@@ -1729,7 +1713,7 @@ def main_page():
       </div>
     </div>
     """, unsafe_allow_html=True)
-    
+
 def main():
         st.set_page_config(page_title="داشبورد پیش‌بینی", page_icon="📈", layout="wide")
         main_page()
