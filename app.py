@@ -1614,68 +1614,56 @@ def main_page():
                     fuzzy=round(float(fuzzy_err),3),mse=round(float(mse),3),
                     final=round(float(final),4))
     
-    # 7) build performance summary ----------------------------------------
-    records=[]
-    for n in expert_cols:
-        st4=[horizon_stats(n,i) for i in range(4)]
-        attend=int(pd.to_numeric(df_perf.loc[df_perf["perf_date"]==system_today,
-                            count_cols[n]].squeeze(),errors="coerce") or 0) \
-               if system_today in df_perf["perf_date"].values else 0
-        pct=attend/((df_perf["perf_date"]<=system_today).sum()) if df_perf.shape[0] else 0
-        timing=pd.to_numeric(df_perf[timing_cols[n]],errors="coerce").mean()
-    
-        records.append({"نام":n,
-            "امتیاز همان روز":st4[0]["final"], "امتیاز فردا":st4[1]["final"],
-            "امتیاز پسفردا":st4[2]["final"], "امتیاز ۳ روز بعد":st4[3]["final"],
-            "تعداد روزهای مشارکت":attend, "درصد مشارکت":pct,
-            "میانگین سرعت پیش‌بینی":timing})
-    perf=pd.DataFrame(records)
-    # ----------  build performance summary (+ save stats)  ---------------
+    # 7) build performance summary  +  📋 جدول تجمیعی (بدون امروز)
+    # ---------------------------------------------------------------------
     records   = []
-    all_stats = {}              # ← اضافه شد
+    all_stats = {}          # ← برای دسترسی بعدی
     
     for name in expert_cols:
-        stats = [horizon_stats(name, i) for i in range(4)]
-        all_stats[name] = stats          # ← ذخیره برای جدول تجمیعی
+        stats = [horizon_stats(name, i) for i in range(4)]   # 0:today … 3
+        all_stats[name] = stats
     
         attend = int(pd.to_numeric(
             df_perf.loc[df_perf["perf_date"] == system_today, count_cols[name]].squeeze(),
             errors="coerce") or 0) if system_today in df_perf["perf_date"].values else 0
-        pct    = attend / ((df_perf["perf_date"] <= system_today).sum()) if df_perf.shape[0] else 0
-        timing = pd.to_numeric(df_perf[timing_cols[name]], errors="coerce").mean()
+        pct_part = attend / ((df_perf["perf_date"] <= system_today).sum()) if df_perf.shape[0] else 0
+        timing   = pd.to_numeric(df_perf[timing_cols[name]], errors="coerce").mean()
     
         records.append({
             "نام": name,
-            "امتیاز همان روز":   stats[0]["final"],
-            "امتیاز فردا":       stats[1]["final"],
-            "امتیاز پسفردا":     stats[2]["final"],
-            "امتیاز ۳ روز بعد":  stats[3]["final"],
+            "امتیاز همان روز":  stats[0]["final"],
+            "امتیاز فردا":      stats[1]["final"],
+            "امتیاز پسفردا":    stats[2]["final"],
+            "امتیاز ۳ روز بعد": stats[3]["final"],
             "تعداد روزهای مشارکت": attend,
-            "درصد مشارکت":        pct,
+            "درصد مشارکت":        pct_part,
             "میانگین سرعت پیش‌بینی": timing
         })
     
     perf = pd.DataFrame(records)
-    # ---------------------------------------------------------------------
-    # 🔗 جدول جمع‌بندی چهار افق
-    # ---------------------------------------------------------------------
+    
+    # ----------  📋 جدول جمع‌بندی کل افق‌ها (بدون افق امروز)  -------------
     agg_rows = []
     for name, stat_list in all_stats.items():
+        future_stats = stat_list[1:]      # index 1,2,3  → فردا و بعد
+    
         agg_rows.append({
-            "کارشناس":           name,
-            "Override":          sum(s["override"] for s in stat_list),
-            "Correct":           sum(s["correct"]  for s in stat_list),
-            "Wrong":             sum(s["wrong"]    for s in stat_list),
-            "FuzzyErr(AVG)":     round(np.mean([s["fuzzy"] for s in stat_list]), 3),
-            "MSE(AVG)":          round(np.nanmean([s["mse"]  for s in stat_list]), 3),
-            "FinalScore(AVG)":   round(np.mean([s["final"] for s in stat_list]), 4)
+            "کارشناس":          name,
+            "Override":         sum(s["override"] for s in future_stats),
+            "Correct":          sum(s["correct"]  for s in future_stats),
+            "Wrong":            sum(s["wrong"]    for s in future_stats),
+            "FuzzyErr(AVG)":    round(np.mean([s["fuzzy"] for s in future_stats]), 3),
+            "MSE(AVG)":         round(np.nanmean([s["mse"] for s in future_stats]), 3),
+            "FinalScore(AVG)":  round(np.mean([s["final"] for s in future_stats]), 4),
         })
     
-    agg_df = pd.DataFrame(agg_rows).sort_values("FinalScore(AVG)", ascending=False)
+    agg_df = (pd.DataFrame(agg_rows)
+              .sort_values("FinalScore(AVG)", ascending=False)
+              .reset_index(drop=True))
     
-    st.subheader("📋 جدول جمع‌بندی کل افق‌ها")
+    st.subheader("📋 جدول جمع‌بندی کل افق‌ها (فقط فردا تا ۳ روز بعد)")
     st.dataframe(agg_df, use_container_width=True)
-    
+    # ---------------------------------------------------------------------
 
     # 8) composite overall score ------------------------------------------
     norm=lambda s:(s-s.min())/(s.max()-s.min()+eps)
