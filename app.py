@@ -1545,7 +1545,7 @@ def main_page():
     # ---------------------------------------------------------------------
     st.write("---")
     
-    # ▶ 1) بارگذاری Sheet1 (پیش‌بینی‌ها) و Sheet2 (Actual + شمارنده‌ها)
+    # ── 1) Load both sheets (read-only) ───────────────────────────────────
     creds_ro = service_account.Credentials.from_service_account_info(
         st.secrets["gcp_service_account"],
         scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
@@ -1560,113 +1560,92 @@ def main_page():
                   .worksheet("Sheet2")
     df_perf = pd.DataFrame(ws_perf.get_all_records())
     
-    # ▶ 2) تاریخ‌ها
+    # ── 2) Parse dates & helpers ─────────────────────────────────────────
     df_pred["pred_date"] = pd.to_datetime(df_pred["Date"], errors="coerce").dt.date
     df_perf["perf_date"] = pd.to_datetime(df_perf["Date"], errors="coerce").dt.date
+    actual_map = dict(zip(df_perf["perf_date"],
+                          pd.to_numeric(df_perf["Actual"], errors="coerce")))
     
     system_today = datetime.datetime.now(tehran_tz).date()
-    if system_today in df_perf["perf_date"].values:
-        today_idx = df_perf.index[df_perf["perf_date"] == system_today][0]
-    else:
-        today_idx = len(df_perf) - 1
-    total_days = today_idx + 1      # برای درصد مشارکت
+    total_days   = (df_perf["perf_date"] <= system_today).sum()   # for % participation
+    eps          = 1e-6
     
-    # ▶ 3) نگاشت ستون‌ها
+    # ── 3) Column maps ───────────────────────────────────────────────────
     HORIZONS = ["today", "tomorrow", "2days", "3days"]
     SYS_COLS = [f"System prac {h}" for h in HORIZONS]
     
     expert_cols = {
-        "محمدرضا ایدرم":   [f"idrom {h}"      for h in HORIZONS],
-        "فرشته فرجی":      [f"fereshteh {h}"  for h in HORIZONS],
-        "آرش پیریایی":     [f"Arash {h}"      for h in HORIZONS],
-        "فرزین سوری":      [f"Farzin {h}"     for h in HORIZONS],
-        "احسان همایونی":   [f"Ehsan {h}"      for h in HORIZONS],
-        "امیرحسین محتشم":  [f"Mohtasham {h}"  for h in HORIZONS],
-        "فرهاد حیدری":     [f"Farhad {h}"     for h in HORIZONS],
+        "محمدرضا ایدرم":   [f"idrom {h}"     for h in HORIZONS],
+        "فرشته فرجی":      [f"fereshteh {h}" for h in HORIZONS],
+        "آرش پیریایی":     [f"Arash {h}"     for h in HORIZONS],
+        "فرزین سوری":      [f"Farzin {h}"    for h in HORIZONS],
+        "احسان همایونی":   [f"Ehsan {h}"     for h in HORIZONS],
+        "امیرحسین محتشم":  [f"Mohtasham {h}" for h in HORIZONS],
+        "فرهاد حیدری":     [f"Farhad {h}"    for h in HORIZONS],
     }
     
-    # ستون‌های شمارنده و زمان (همان Sheet2 قدیمی – تغییر نکند)
-    count_cols  = {           # برای حضور
-        "محمدرضا ایدرم":   "Idrom count",
-        "فرشته فرجی":      "fereshteh count",
-        "آرش پیریایی":     "arash count",
-        "فرزین سوری":      "farzin count",
-        "احسان همایونی":   "ehsan count",
-        "امیرحسین محتشم":  "mohtasham count",
-        "فرهاد حیدری":     "farhad count",
+    count_cols = {
+        "محمدرضا ایدرم":"Idrom count","فرشته فرجی":"fereshteh count","آرش پیریایی":"arash count",
+        "فرزین سوری":"farzin count","احسان همایونی":"ehsan count","امیرحسین محتشم":"mohtasham count",
+        "فرهاد حیدری":"farhad count",
     }
-    timing_cols = {           # برای سرعت
-        "محمدرضا ایدرم":   "Idrom timing",
-        "فرشته فرجی":      "fereshteh timing",
-        "آرش پیریایی":     "arash timing",
-        "فرزین سوری":      "farzin timing",
-        "احسان همایونی":   "ehsan timing",
-        "امیرحسین محتشم":  "mohtasham timing",
-        "فرهاد حیدری":     "farhad timing",
+    timing_cols = {
+        "محمدرضا ایدرم":"Idrom timing","فرشته فرجی":"fereshteh timing","آرش پیریایی":"arash timing",
+        "فرزین سوری":"farzin timing","احسان همایونی":"ehsan timing","امیرحسین محتشم":"mohtasham timing",
+        "فرهاد حیدری":"farhad timing",
     }
     
-    # ▶ 4) تابع سطل‌رنگ (۰=آبی … ۴=سیاه)
-    def colour_of(val):
+    # ── 4) Colour bucket util (0 blue … 4 black) ─────────────────────────
+    def colour_of(v):
         try:
-            v = float(val)
+            x = float(v)
         except:
             return 4
-        return fuzz_color(v, total=330)    # همان تابع قبلی
+        return fuzz_color(x, total=330)
     
-    # ▶ 5) محاسبه امتیازهای فازی-Override
-    def metrics_for(expert_name, horizon_idx):
-        """override_score, fuzzy_err, final_score  (با قانون قفل‌شدن h+1 روزه)"""
-        hlabel   = HORIZONS[horizon_idx]
-        col_exp  = expert_cols[expert_name][horizon_idx]
-        col_sys  = SYS_COLS[horizon_idx]
+    # ── 5) Metrics for one expert & one horizon ──────────────────────────
+    def horizon_metrics(name, h):
+        col_exp = expert_cols[name][h]
+        col_sys = SYS_COLS[h]
+        lag_req = h + 1                                       # days to wait
     
-        lag_cut  = system_today - datetime.timedelta(days=horizon_idx+1)
-        rows_ok  = df_pred[df_pred["pred_date"] <= lag_cut]
-    
-        if rows_ok.empty:
+        # rows whose prediction date is old enough
+        mask_ok = df_pred["pred_date"] + datetime.timedelta(days=lag_req) <= system_today
+        if not mask_ok.any():
             return 0.0, 4.0, 0.0
     
-        # الحاق Actual مربوط به تاریخ real_date = pred_date + h
-        act_dates = rows_ok["pred_date"] + pd.to_timedelta(horizon_idx, unit="D")
-        act_vals  = act_dates.map(
-            dict(zip(df_perf["perf_date"], pd.to_numeric(df_perf["Actual"], errors="coerce")))
-        )
+        sub = df_pred[mask_ok].copy()
+        # look-up actual for calendar day (pred_date + h)
+        sub["target_date"] = sub["pred_date"] + pd.to_timedelta(h, unit="D")
+        sub["actual_val"]  = sub["target_date"].map(actual_map)
     
-        pred_exp  = pd.to_numeric(rows_ok[col_exp], errors="coerce")
-        pred_sys  = pd.to_numeric(rows_ok[col_sys], errors="coerce")
-    
-        mask_valid = act_vals.notna() & pred_exp.notna() & pred_sys.notna()
-        if not mask_valid.any():
+        # drop rows where any piece is missing
+        sub = sub.dropna(subset=["actual_val", col_exp, col_sys])
+        if sub.empty:
             return 0.0, 4.0, 0.0
     
-        c_act = act_vals[mask_valid].map(colour_of)
-        c_exp = pred_exp[mask_valid].map(colour_of)
-        c_sys = pred_sys[mask_valid].map(colour_of)
+        c_act = sub["actual_val"].map(colour_of)
+        c_exp = pd.to_numeric(sub[col_exp], errors="coerce").map(colour_of)
+        c_sys = pd.to_numeric(sub[col_sys], errors="coerce").map(colour_of)
     
         overrides      = c_exp != c_sys
         total_ovr      = overrides.sum()
         correct_ovr    = ((c_exp == c_act) & overrides).sum()
-        override_score = (correct_ovr / total_ovr) if total_ovr else 0.0
-        fuzzy_err      = (c_exp - c_act).abs().mean()
+        override_score = correct_ovr / total_ovr if total_ovr else 0.0
     
-        final_score    = ((4 - fuzzy_err) * override_score) / 4      # مقیاس ۰‒۱
+        fuzzy_err      = (c_exp - c_act).abs().mean()
+        final_score    = ((4 - fuzzy_err) * override_score) / 4    # 0–1 scale
         return override_score, fuzzy_err, final_score
     
-    # ▶ 6) جدول خروجی برای همهٔ خبرگان
+    # ── 6) Build summary DataFrame ───────────────────────────────────────
     records = []
-    eps = 1e-6
-    mask_today = df_perf["perf_date"] == system_today
-    
     for name in expert_cols:
-        fs = []
-        for h in range(4):
-            _, _, f = metrics_for(name, h)
-            fs.append(f)
+        fs = [horizon_metrics(name, h)[2] for h in range(4)]
     
-        # مشارکت و سرعت (از Sheet2 – بدون تغییر)
         attend = int(pd.to_numeric(
-            df_perf.loc[mask_today, count_cols[name]].squeeze(), errors="coerce"
-        ) or 0) if mask_today.any() else 0
+            df_perf.loc[df_perf["perf_date"] == system_today, count_cols[name]].squeeze(),
+            errors="coerce"
+        ) or 0) if system_today in df_perf["perf_date"].values else 0
         pct_part = attend / total_days if total_days else 0.0
         timing   = pd.to_numeric(df_perf[timing_cols[name]], errors="coerce").mean()
     
@@ -1683,7 +1662,7 @@ def main_page():
     
     perf = pd.DataFrame(records)
     
-    # ▶ 7) امتیاز نهایی + نرمال‌سازی
+    # ── 7) Final composite score  (unchanged weights) ────────────────────
     def norm(s): return (s - s.min()) / (s.max() - s.min() + eps)
     
     perf["_h0"] = norm(perf["امتیاز همان روز"])
@@ -1693,19 +1672,16 @@ def main_page():
     perf["_p"]  = norm(perf["درصد مشارکت"])
     
     perf["رتبه سرعت پیش‌بینی"] = perf["میانگین سرعت پیش‌بینی"].rank(method="min")
-    perf["_r"]  = norm(perf["رتبه سرعت پیش‌بینی"].max() - perf["رتبه سرعت پیش‌بینی"])
+    perf["_r"] = norm(perf["رتبه سرعت پیش‌بینی"].max() - perf["رتبه سرعت پیش‌بینی"])
     
     perf["امتیاز نهایی"] = (
           0.2*perf["_h0"] + 0.2*perf["_h1"]
         + 0.2*perf["_h2"] + 0.2*perf["_h3"]
         + 0.1*perf["_p"]  + 0.1*perf["_r"]
     )
-    
     perf["درصد مشارکت"] = (perf["درصد مشارکت"]*100).round(1).astype(str) + "%"
     
-    # ──────────────────────────────────────────────────────────────────────
-    #                       🟦  عملکرد شخصی  🟦
-    # ──────────────────────────────────────────────────────────────────────
+    # ── 8) ║ عملکرد شما ║ ────────────────────────────────────────────────
     if st.session_state.get("logged_user"):
         you = perf.loc[perf["نام"] == st.session_state.logged_user].squeeze()
         st.markdown(f"""
@@ -1725,9 +1701,7 @@ def main_page():
         </div>
         """, unsafe_allow_html=True)
     
-    # ──────────────────────────────────────────────────────────────────────
-    #                   🏆  قهرمانان پیش‌بینی  🏆
-    # ──────────────────────────────────────────────────────────────────────
+    # ── 9) ║ قهرمانان پیش‌بینی ║ ───────────────────────────────────────
     st.subheader("🏆 قهرمانان پیش‌بینی")
     
     h0_champ = perf.loc[perf["امتیاز همان روز"].idxmax(),  "نام"]
@@ -1735,9 +1709,9 @@ def main_page():
     h2_champ = perf.loc[perf["امتیاز پسفردا"].idxmax(),    "نام"]
     h3_champ = perf.loc[perf["امتیاز ۳ روز بعد"].idxmax(), "نام"]
     
-    part_champ  = perf.loc[perf["تعداد روزهای مشارکت"].idxmax(),  "نام"]   # بدون تغییر
-    speed_champ = perf.loc[perf["رتبه سرعت پیش‌بینی"].idxmin(),   "نام"]   # بدون تغییر
-    total_champ = perf.loc[perf["امتیاز نهایی"].idxmax(),         "نام"]
+    part_champ  = perf.loc[perf["تعداد روزهای مشارکت"].idxmax(), "نام"]
+    speed_champ = perf.loc[perf["رتبه سرعت پیش‌بینی"].idxmin(), "نام"]
+    total_champ = perf.loc[perf["امتیاز نهایی"].idxmax(),        "نام"]
     
     st.markdown(f"""
     <div style="direction:rtl;font-family:Tahoma;color:#2c3e50;background:#f0f4f8;
@@ -1755,10 +1729,10 @@ def main_page():
       </div>
     </div>
     """, unsafe_allow_html=True)
-
+    
 def main():
-    st.set_page_config(page_title="داشبورد پیش‌بینی", page_icon="📈", layout="wide")
-    main_page()
-
+        st.set_page_config(page_title="داشبورد پیش‌بینی", page_icon="📈", layout="wide")
+        main_page()
+    
 if __name__ == "__main__":
-    main()
+        main()
