@@ -10,3 +10,5 @@ google-auth-httplib2==0.1.0
 google-api-python-client==2.86.0
 statsmodels==0.14.4
 xgboost==2.1.4
+sqlalchemy
+psycopg2-binary
