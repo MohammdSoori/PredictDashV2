@@ -1,0 +1,2181 @@
+import streamlit as st
+import streamlit.components.v1 as components
+
+import pandas as pd
+import numpy as np
+import math
+import pickle
+import datetime
+from datetime import date
+
+import jdatetime
+import zoneinfo  # Available in Python 3.9+
+tehran_tz = zoneinfo.ZoneInfo("Asia/Tehran")
+
+import gspread
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+
+from typing import Dict, List, Optional
+
+from sqlalchemy import create_engine
+from urllib.parse import quote_plus
+
+
+# ---------------------------------------------------------------------------
+#   GLOBAL: GCP credentials
+# ---------------------------------------------------------------------------
+GCP_CRED_FILE = "extreme-lattice-452612-s1-2dbb968dbb10.json"   
+
+def load_gcp_creds(scopes: list[str]):
+    """Return a Credentials object from the local JSON-key file."""
+    return service_account.Credentials.from_service_account_file(
+        GCP_CRED_FILE,
+        scopes=scopes
+    )
+
+
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Database connection 
+# ────────────────────────────────────────────────────────────────────────────────
+_USER: str = "..."
+_PASSWORD: str = quote_plus("...")         
+_HOST: str = "..."
+_PORT: int = .
+_DATABASE: str = "..."
+
+_ENGINE = create_engine(
+    f"postgresql+psycopg2://{_USER}:{_PASSWORD}@{_HOST}:{_PORT}/{_DATABASE}",
+    pool_pre_ping=True,
+)
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Building-ID → Building-Name mapping
+# ────────────────────────────────────────────────────────────────────────────────
+_BUILDING_NAME_MAP: dict[int, str] = {
+    32: "test",
+    29: "Parkway",
+    28: "Jordan",
+    27: "Evin",
+    26: "Gandhi",
+    25: "Mirdamad",
+    24: "Pasdaran",
+    23: "Toranj",
+    22: "Koroush",
+    21: "Ashrafi",
+    20: "Vila",
+    19: "Mosalla",
+    18: "Keshavarz",
+    17: "Valiasr",
+    16: "Nofel",
+}
+
+# ────────────────────────────────────────────────────────────────────────────────
+# Query used for both detailed and aggregated datasets
+# ────────────────────────────────────────────────────────────────────────────────
+_QUERY: str = r"""
+WITH date_series AS (
+    SELECT generate_series(
+        %(start_date)s::date,
+        %(end_date)s::date,
+        '1 day'::interval
+    ) AS date
+),
+all_types AS (
+    SELECT
+        t.id                 AS type_id,
+        b.id                 AS building_id,
+        b."order",
+        t.fa_title,
+        t.price,
+        t.enabled            AS type_enabled,
+        b.enabled            AS building_enabled,
+        COUNT(r.id)          AS room_count
+    FROM types t
+    LEFT JOIN rooms     r ON t.id = r.type_id AND r.enabled = TRUE
+    LEFT JOIN buildings b ON t.building_id = b.id
+    WHERE
+        (%(building_id)s IS NULL OR t.building_id = %(building_id)s) AND
+        (%(region)s      IS NULL OR b.region      = %(region)s)
+    GROUP BY t.id, b.id, t.fa_title, t.price
+),
+reserved_counts AS (
+    SELECT
+        r.type_id,
+        ds.date,
+        COUNT(DISTINCT r.room_id) AS reserved_count
+    FROM date_series ds
+    LEFT JOIN reservations r ON  ds.date >= r.checkin::date
+                              AND ds.date <  COALESCE(r.canceled_from::date, r.checkout::date)
+                              AND r.last_status <> 3
+    GROUP BY r.type_id, ds.date
+),
+blocked_counts AS (
+    SELECT
+        rm.type_id,
+        ds.date,
+        COUNT(DISTINCT br.room_id) AS blocked_count
+    FROM date_series ds
+    LEFT JOIN (
+        SELECT bs.room_id, rm.type_id, bs.date
+        FROM room_statuses bs
+        JOIN rooms rm ON bs.room_id = rm.id
+        WHERE bs.status IN (1, 3)
+          AND bs.date BETWEEN %(start_date)s AND %(end_date)s
+          AND bs.deleted_at IS NULL
+    ) br ON ds.date = br.date
+    JOIN rooms rm ON br.room_id = rm.id
+    GROUP BY rm.type_id, ds.date
+),
+availability AS (
+    SELECT
+        ds.date,
+        at.type_id,
+        COALESCE(SUM(rr.reserved_count), 0) AS total_reserved_count,
+        COALESCE(SUM(br.blocked_count), 0)  AS total_blocked_count
+    FROM date_series ds
+    JOIN all_types at ON TRUE
+    LEFT JOIN reserved_counts rr ON at.type_id = rr.type_id AND ds.date = rr.date
+    LEFT JOIN blocked_counts  br ON at.type_id = br.type_id AND ds.date = br.date
+    GROUP BY ds.date, at.type_id
+),
+price_factors AS (
+    SELECT type_id, date, factor_rate
+    FROM   type_price_factors
+    WHERE  date BETWEEN %(start_date)s AND %(end_date)s
+),
+price_calculations AS (
+    SELECT
+        at.type_id,
+        ds.date,
+        FLOOR(
+            COALESCE(
+                CASE
+                    WHEN COALESCE(pf.factor_rate, 0) <> 0
+                         THEN at.price + (pf.factor_rate * at.price / 100)
+                    WHEN EXTRACT(DOW FROM ds.date) IN (5, 6)
+                         THEN at.price * 0.90
+                    ELSE at.price
+                END,
+            0)
+        )::int AS price,
+        COALESCE(pf.factor_rate, 0) AS factor_rate
+    FROM all_types at
+    CROSS JOIN date_series ds
+    LEFT JOIN LATERAL (
+        SELECT pf.factor_rate
+        FROM   price_factors pf
+        WHERE  pf.type_id = at.type_id
+          AND  pf.date    = ds.date
+    ) pf ON TRUE
+)
+SELECT
+    pc.type_id,
+    at.building_id,
+    at."order",
+    TO_CHAR(pc.date, 'YYYY-MM-DD')              AS date,
+    pc.price,
+    pc.factor_rate,
+    CAST(
+        CASE
+            WHEN at.building_enabled AND at.type_enabled
+            THEN COALESCE(at.room_count, 0)
+                 - COALESCE(av.total_reserved_count, 0)
+                 - COALESCE(av.total_blocked_count, 0)
+            ELSE 0
+        END
+    AS INT)                                     AS available_room_count,
+    (pc.price BETWEEN %(min_price)s AND %(max_price)s) AS rendered
+FROM price_calculations pc
+JOIN all_types  at ON pc.type_id = at.type_id
+LEFT JOIN availability av ON pc.type_id = av.type_id AND pc.date = av.date
+ORDER BY
+    at.building_enabled DESC,
+    at.type_enabled    DESC,
+    pc.type_id,
+    pc.date;
+"""
+
+# ────────────────────────────────────────────────────────────────────────────────
+#  Public helper function for aggregated availability summary
+# ────────────────────────────────────────────────────────────────────────────────
+def get_availability_summary(
+    *,
+    start_date: date,
+    end_date: date,
+    building_id: Optional[int] = None,
+    region: Optional[str] = None,
+    min_price: int = 0,
+    max_price: int = 10_000_000,
+    engine=_ENGINE,
+) -> pd.DataFrame:
+    """
+    Return an aggregated availability summary (df_agg) as a pandas DataFrame.
+
+    Parameters
+    ----------
+    start_date, end_date : datetime.date
+        Inclusive date range for which to fetch data.
+    building_id : int | None, default None
+        Filter by building-ID. None means “all buildings”.
+    region : str | None, default None
+        Filter by building region. None means “all regions”.
+    min_price, max_price : int, defaults 0 … 10 000 000
+        Price band applied in the query.
+    engine : sqlalchemy.engine.Engine, default module-level pooled engine
+        Override if you need to supply your own SQLAlchemy engine.
+
+    Returns
+    -------
+    pandas.DataFrame
+        DataFrame with columns:
+        ['building_id', 'date', 'available_room_count', 'building_name']
+    """
+    params: dict[str, object] = {
+        "start_date": start_date,
+        "end_date": end_date,
+        "building_id": building_id,
+        "region": region,
+        "min_price": min_price,
+        "max_price": max_price,
+    }
+
+    # ───────────────────────────────────────────────────────────── database query
+    with engine.connect() as conn:
+        df_full = pd.read_sql(
+            sql=_QUERY,
+            con=conn,
+            params=params,
+            parse_dates=["date"],
+        )
+
+    # ─────────────────────────────────────────────────── map building name column
+    df_full["building_name"] = df_full["building_id"].map(_BUILDING_NAME_MAP)
+    df_full = df_full[df_full["building_id"] != 32]      
+
+    # ─────────────────────────────────────────────── aggregate to requested form
+    df_agg: pd.DataFrame = (
+        df_full.groupby(["building_id", "date"], as_index=False)["available_room_count"]
+        .sum()
+        .assign(building_name=lambda d: d["building_id"].map(_BUILDING_NAME_MAP))
+    )
+
+    return df_agg
+
+##############################################################################
+#                   HELPER FUNCTIONS: GOOGLE SHEETS, DATE PARSING, ETC.
+##############################################################################
+
+@st.cache_data
+def create_gsheets_connection():
+    """Create a cached connection to Google Sheets (read-only) using st.secrets."""
+    creds = load_gcp_creds(["https://www.googleapis.com/auth/spreadsheets.readonly"])
+    service = build('sheets', 'v4', credentials=creds)
+    return service
+
+
+def get_pickup_value_for_day(pivot_df, arrival_date, offset):
+    """
+    Returns the number of reservations (pickup count) for a given arrival_date and offset.
+    For example, for offset=4, it returns the count of reservations where
+    'تاریخ ورود میلادی' equals arrival_date and 'تاریخ معامله میلادی'
+    equals arrival_date minus 4 days.
+    """
+    if arrival_date in pivot_df.index:
+        try:
+            return int(pivot_df.loc[arrival_date, f"pickup{offset}"])
+        except:
+            return 0
+    return 0
+
+def compute_avg_for_weekday(input_df, target_weekday, days_interval):
+    """Compute average Blank for a given weekday over a given past period."""
+    system_today = datetime.datetime.now(tehran_tz).date()
+    start_date = system_today - datetime.timedelta(days=days_interval)
+    mask = (
+        (input_df["parsed_input_date"] >= start_date) &
+        (input_df["parsed_input_date"] <= system_today) &
+        (input_df["parsed_input_date"].apply(lambda d: d.weekday() if pd.notnull(d) else -1) == target_weekday)
+    )
+    filtered = input_df[mask]
+    if not filtered.empty:
+        try:
+            return filtered["Blank"].astype(float).mean()
+        except:
+            return 0
+    return 0
+
+def read_sheet_values(service, spreadsheet_id, sheet_name, cell_range):
+    rng = f"{sheet_name}!{cell_range}"
+    result = service.spreadsheets().values().get(
+        spreadsheetId=spreadsheet_id, range=rng
+    ).execute()
+    values = result.get('values', [])
+    if not values:
+        return pd.DataFrame()
+    header = values[0]
+    data = values[1:]
+    return pd.DataFrame(data, columns=header)
+
+def parse_input_date_str(date_str):
+    """Parses a date in 'YYYY/MM/DD' format from the Input sheet."""
+    s = str(date_str).strip()
+    try:
+        dt = datetime.datetime.strptime(s, "%Y/%m/%d")
+        return dt.date()
+    except:
+        return None
+
+def parse_output_date_str(date_str):
+    """Parses a date in 'Saturday, March 8, 2025 at 12:00:00 AM' format from Output sheet."""
+    s = str(date_str).strip()
+    try:
+        dt = datetime.datetime.strptime(s, "%A, %B %d, %Y at %I:%M:%S %p")
+        return dt.date()
+    except:
+        return None
+
+def safe_int(val):
+    if val is None:
+        return 0
+    return 1 if str(val).strip() == "1" else 0
+
+##############################################################################
+#           FORECAST HELPERS: UNIVARIATE, MOVING AVG, TS DECOMP REG
+##############################################################################
+
+def forecast_univariate_statsmodels(model_fit, shift):
+    steps_ahead = shift + 1
+    fc = model_fit.forecast(steps=steps_ahead)
+    return float(fc.iloc[-1])
+
+def forecast_moving_avg(ma_dict):
+    if not isinstance(ma_dict, dict):
+        return np.nan
+    last_vals = ma_dict.get("last_window", [])
+    if len(last_vals) == 0:
+        return np.nan
+    return float(np.mean(last_vals))
+
+def forecast_ts_decomp_reg(ts_tuple, X_today, shift):
+    decomposition, lr = ts_tuple
+    trend = decomposition.trend
+    seasonal = decomposition.seasonal
+    last_trend = float(trend.dropna().iloc[-1]) if (trend is not None and not trend.dropna().empty) else 0.0
+    seas_vals = seasonal.dropna().values if (seasonal is not None and not seasonal.dropna().empty) else [0.0]
+    pos = shift % len(seas_vals)
+    try:
+        resid_pred = float(lr.predict(X_today)[0])
+    except:
+        resid_pred = 0.0
+    return last_trend + seas_vals[pos] + resid_pred
+
+##############################################################################
+#                            CUSTOM CSS & FONT SETUP
+##############################################################################
+
+def load_css():
+    st.markdown(
+        """
+        <style>
+        * {
+            font-family: "Tahoma", sans-serif !important;
+        }
+        body {
+            background-color: #eef2f7;
+            direction: rtl;
+            text-align: center;
+        }
+        .header {
+            background-color: #2c3e50;
+            color: #ecf0f1;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+            font-size: 28px;
+            text-align: center;
+        }
+        .scoreboard {
+            background-color: #ecf0f1;
+            border: 2px solid #34495e;
+            border-radius: 5px;
+            padding: 8px;
+            margin-bottom: 8px;
+            text-align: center;
+            font-size: 16px;
+            font-weight: bold;
+            color: #34495e;
+        }
+        table, th, td {
+            text-align: center !important;
+        }
+        .stTable {
+            font-size: 18px;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
+hotel_name_map = {
+    "Ashrafi": "اشرفی",
+    "Evin": "اوین",
+    "Gandhi": "گاندی",
+    "Jordan": "جردن",
+    "Keshavarz": "کشاورز",
+    "Koroush": "کوروش",
+    "Mirdamad": "میرداماد",
+    "Niloofar": "نیلوفر",
+    "Nofel": "نوفل",
+    "Parkway": "پارک وی",
+    "Pasdaran": "پاسداران",
+    "Toranj": "ترنج",
+    "Valiasr": "ولیعصر",
+    "Vila": "ویلا",
+    "Mosalla": "مصلی",
+}
+
+##############################################################################
+#               PICKUP MODEL HELPERS (for the "مدل پیکآپ" column)
+##############################################################################
+
+
+def convert_farsi_number(num):
+    try:
+        s = str(num).strip()
+        if s == "" or s.lower() in ["nan", "none"]:
+            return 1
+        farsi_to_english = str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")
+        converted = s.translate(farsi_to_english)
+        return int(converted)
+    except:
+        return 1
+
+@st.cache_data
+def get_data_from_pickup_sheet():
+    """Retrieve pickup data from Google Sheets using st.secrets for credentials."""
+    scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+    creds = load_gcp_creds(scopes)
+    client = gspread.authorize(creds)
+    sheet = client.open_by_key(
+        "1D5ROCnoTKCFBQ8me8wLIri8mlaOUF4v1hsyC7LXIvAE"
+    ).worksheet("Sheet1")
+    records = sheet.get_all_records()
+    return pd.DataFrame(records)
+
+
+def build_pickup_pivot(df):
+    df = df[["تاریخ معامله میلادی", "تاریخ ورود میلادی", "تعداد شب"]].copy()
+    df["تاریخ معامله میلادی"] = pd.to_datetime(df["تاریخ معامله میلادی"], format="%Y/%m/%d", errors="coerce")
+    df["تاریخ ورود میلادی"] = pd.to_datetime(df["تاریخ ورود میلادی"], format="%Y/%m/%d", errors="coerce")
+    df["تعداد شب"] = df["تعداد شب"].fillna(1)
+    df["تعداد شب"] = df["تعداد شب"].apply(lambda x: convert_farsi_number(x))
+    
+    pivot_list = []
+    unique_arrivals = df["تاریخ ورود میلادی"].dropna().dt.date.unique()
+    
+    for arrival in unique_arrivals:
+        arrival_date = arrival
+        row = {"تاریخ ورود میلادی": arrival_date}
+        for offset in range(0, 11):
+            target_deal_date = arrival_date - datetime.timedelta(days=offset)
+            sub = df[
+                (df["تاریخ ورود میلادی"].dt.date == arrival_date)
+                & (df["تاریخ معامله میلادی"].dt.date == target_deal_date)
+            ]
+            row[f"pickup{offset}"] = len(sub)
+            row[f"pickup_night{offset}"] = sub["تعداد شب"].sum()
+        pivot_list.append(row)
+    
+    pivot_df = pd.DataFrame(pivot_list)
+    pivot_df = pivot_df.set_index("تاریخ ورود میلادی").fillna(0)
+    
+    cols = []
+    for offset in range(0, 11):
+        cols.append(f"pickup{offset}")
+        cols.append(f"pickup_night{offset}")
+    pivot_df = pivot_df[cols]
+    return pivot_df
+
+def load_pickup_model(filename):
+    with open(filename, "rb") as f:
+        model = pickle.load(f)
+    return model
+
+def predict_pickup_for_shift(arrival_date, pivot_df, shift):
+    if arrival_date in pivot_df.index:
+        feature_row = pivot_df.loc[arrival_date]
+    else:
+        feature_row = pd.Series({col: 0 for col in pivot_df.columns})
+
+    X_features = feature_row.values.reshape(1, -1)
+    
+    if shift == 0:
+        model_filename = "Pickup/linear_regression_model.pkl"
+    else:
+        model_filename = f"Pickup/linear_regression_model_shift_{shift}.pkl"
+    
+    try:
+        model = load_pickup_model(model_filename)
+    except FileNotFoundError as e:
+        st.error(f"[Pickup] Model file not found: {model_filename}")
+        return None
+    except Exception as e:
+        st.error(f"[Pickup] Error loading model {model_filename}: {e}")
+        return None
+    
+    predicted_empty = model.predict(X_features)[0]
+    return predicted_empty
+
+##############################################################################
+#                       READ MAIN DATA (CACHED)
+##############################################################################
+
+@st.cache_data
+def read_main_dfs():
+    """
+    We read Input from 'Input' sheet for numeric columns (Blank, Hold, etc.),
+    and Output from 'Output' sheet for holiday flags like IsStartOfRamadhan, etc.
+    """
+    service = create_gsheets_connection()
+    SPREADSHEET_ID = "1LI0orqvqci1d75imMfHKxZ512rUUlpA7P1ZYjV-uVO0"
+
+    # Input data
+    input_df = read_sheet_values(service, SPREADSHEET_ID, "Input", "A1:ZZ10000")
+    input_df["Date"] = input_df.iloc[:, 3]   # column D
+    input_df["Blank"] = input_df.iloc[:, 2]  # column C
+    input_df["parsed_input_date"] = input_df["Date"].apply(parse_input_date_str)
+
+    # Output data
+    output_df = read_sheet_values(service, SPREADSHEET_ID, "Output", "A1:ZZ10000")
+    output_df["parsed_output_date"] = output_df["Date"].apply(parse_output_date_str)
+
+    return input_df, output_df
+
+##############################################################################
+#                          FUZZY COLOR UTILS
+##############################################################################
+
+def fuzz_color(value, total=330):
+    occ = (total - value) / total
+    if occ >= 0.95:
+        return 0  # Blue
+    elif occ >= 0.90:
+        return 1  # Green
+    elif occ >= 0.85:
+        return 2  # Yellow
+    elif occ >= 0.80:
+        return 3  # Red
+    else:
+        return 4  # Black
+
+def union_fuzzy(colors):
+    if not colors:
+        return 0
+    avg_val = sum(colors) / len(colors)
+    return int(round(avg_val))
+
+def color_code_to_hex(c):
+    if c == 0:
+        return "#4A90E2"
+    elif c == 1:
+        return "#7ED321"
+    elif c == 2:
+        return "#F5A623"
+    elif c == 3:
+        return "#D0021B"
+    else:
+        return "#333333"
+
+##############################################################################
+#          Prediction Functions
+##############################################################################
+# ────────────────────────────────────────────────────────────────────────────────
+
+def build_availability_pivot(df_agg: pd.DataFrame) -> pd.DataFrame:
+    """
+    Parameters
+    ----------
+    df_agg : pd.DataFrame
+        Exactly the DataFrame returned by `get_availability_summary`
+        (must contain columns ["building_name", "date", "available_room_count"]).
+
+    Returns
+    -------
+    pd.DataFrame
+        Wide table: index = date (datetime.date), columns = building_name,
+        value = available_room_count (float).
+    """
+    pivot = (
+        df_agg
+        .copy()
+        .pivot(index="date", columns="building_name", values="available_room_count")
+        .sort_index()
+    )
+    # Ensure index is exactly datetime.date (strip any tz / TimeStamp)
+    pivot.index = pivot.index.date
+    return pivot
+
+
+# ------------------------------------------------------------------------------
+#  pishkhor_for_hotel 
+# ------------------------------------------------------------------------------
+def pishkhor_for_hotel(
+    hotel_name: str,
+    start_date: datetime.date,
+    output_df: pd.DataFrame,
+    best_model_map: Dict[str, List[str]],
+    HOTEL_CONFIG: Dict[str, Dict[str, object]],
+    avail_pivot: pd.DataFrame,
+) -> List[float]:
+    """
+    Recursive SHIFT=0 predictions for a single hotel for [day0 … day3].
+
+    Parameters
+    ----------
+    hotel_name      : The building_name key (e.g. "Evin")
+    start_date      : The **Gregorian** calendar date representing 'today'.
+    output_df       : DataFrame pulled from Google Sheet "Output" (for holiday flags).
+    best_model_map  : Mapping[hotel_name] -> list[model_tag] (length ≥ 1).
+    HOTEL_CONFIG    : Your existing per-hotel config block (only `column_order`
+                      is referenced here; `lag_cols` are now *ignored*).
+    avail_pivot     : Wide table produced by `build_availability_pivot()`.
+
+    Returns
+    -------
+    List[float]  – [pred_today, pred_tomorrow, pred_2days, pred_3days]
+    """
+    # ── Resolve model meta ──────────────────────────────────────────────────────
+    model_tag   = best_model_map[hotel_name][0]
+    config      = HOTEL_CONFIG[hotel_name]
+    prefix      = config["model_prefix"]
+    final_order = config["column_order"]
+    model_path  = f"results/{prefix}/{model_tag}_{prefix}0.pkl"
+
+    # ── Load model once ────────────────────────────────────────────────────────
+    try:
+        with open(model_path, "rb") as f:
+            loaded_model = pickle.load(f)
+    except Exception:
+        return [np.nan] * 4
+
+    # ── Memo-cache so Lag-generators can reuse already predicted values ────────
+    predicted_cache: Dict[datetime.date, float] = {}
+
+    # ── Inner: build feature vector for a **single** target_date (shift-0) ────
+    def build_shift0_features(target_date: datetime.date) -> pd.DataFrame:
+        holiday_feats: Dict[str, float] = {}
+
+        # 1️⃣  Holiday / flag features from `output_df`
+        row_match = output_df.index[
+            output_df["parsed_output_date"] == target_date
+        ].tolist()
+
+        def _sheet_flag(row, key: str) -> int:
+            return 1 if (row.get(key, None) == "1" or row.get(key, None) == 1) else 0
+
+        if row_match:
+            row_out = output_df.loc[row_match[0]]
+
+            holiday_feats["Ramadan_dummy"]  = _sheet_flag(row_out, "IsStartOfRamadhan") or \
+                                              _sheet_flag(row_out, "IsMidRamadhan")   or \
+                                              _sheet_flag(row_out, "IsEndOfRamadhan")
+            holiday_feats["Moharram_dummy"] = _sheet_flag(row_out, "IsStartOfMoharam") or \
+                                              _sheet_flag(row_out, "IsMidMoharam")   or \
+                                              _sheet_flag(row_out, "IsEndOfMoharam")
+            holiday_feats["Ashoora_dummy"]  = _sheet_flag(row_out, "IsTasooaAshoora")
+            holiday_feats["Arbain_dummy"]   = _sheet_flag(row_out, "IsArbain")
+            holiday_feats["Eid_Fetr_dummy"] = _sheet_flag(row_out, "IsFetr")
+            holiday_feats["Shabe_Ghadr_dummy"]      = _sheet_flag(row_out, "IsShabeGhadr")
+            holiday_feats["Sizdah-be-Dar_dummy"]    = _sheet_flag(row_out, "Is13BeDar")
+            holiday_feats["Esfand_dummy"]           = 1 if (
+                _sheet_flag(row_out, "IsEarlyEsfand") or _sheet_flag(row_out, "IsLateEsfand")
+            ) else 0
+            holiday_feats["Last 5 Days of Esfand_dummy"] = _sheet_flag(row_out, "IsLastDaysOfTheYear")
+            holiday_feats["Norooz_dummy"]                = _sheet_flag(row_out, "IsNorooz")
+            holiday_feats["Hol_holiday"]                 = _sheet_flag(row_out, "Hol_holiday")
+            holiday_feats["Hol_none"]                    = _sheet_flag(row_out, "Hol_none")
+            holiday_feats["Hol_religious_holiday"]       = _sheet_flag(row_out, "Hol_religious_holiday")
+            holiday_feats["Yalda_dummy"]                 = _sheet_flag(row_out, "Yalda_dummy")
+        else:
+            for col in [
+                "Ramadan_dummy","Moharram_dummy","Ashoora_dummy","Arbain_dummy",
+                "Eid_Fetr_dummy","Shabe_Ghadr_dummy","Sizdah-be-Dar_dummy",
+                "Esfand_dummy","Last 5 Days of Esfand_dummy","Norooz_dummy",
+                "Hol_holiday","Hol_none","Hol_religious_holiday","Yalda_dummy"
+            ]:
+                holiday_feats[col] = 0
+
+        # 2️⃣  Week-day one-hot (WD_0 … WD_6)
+        wd = target_date.weekday()          # Monday==0 … Sunday==6
+        for i in range(7):
+            holiday_feats[f"WD_{i}"] = 1 if i == wd else 0
+
+        # 3️⃣  Lag-based empty-room counts via PMS data
+        def get_emptyrooms_for_date(d: datetime.date) -> float:
+            # Prefer already predicted cache (recursive prediction path)
+            if d in predicted_cache:
+                return predicted_cache[d]
+            try:
+                return float(avail_pivot.loc[d, hotel_name])
+            except (KeyError, ValueError):
+                return 0.0
+
+        for lag in range(1, 16):
+            d_lag = target_date - datetime.timedelta(days=lag)
+            holiday_feats[f"Lag{lag}_EmptyRooms"] = get_emptyrooms_for_date(d_lag)
+
+        # 4️⃣  Assemble in correct column order
+        row_vals = [holiday_feats.get(col, 0.0) for col in final_order]
+        return pd.DataFrame([row_vals], columns=final_order)
+
+    # ── Do recursive 4-day inference ───────────────────────────────────────────
+    preds: List[float] = []
+    for shift in range(4):
+        d_target = start_date + datetime.timedelta(days=shift)
+        X        = build_shift0_features(d_target)
+
+        # Model-family dispatch
+        if model_tag in {"holt_winters", "exp_smoothing"}:
+            val = forecast_univariate_statsmodels(loaded_model, 0)
+        elif model_tag == "moving_avg":
+            val = forecast_moving_avg(loaded_model)
+        elif model_tag == "ts_decomp_reg":
+            val = forecast_ts_decomp_reg(loaded_model, X, 0)
+        else:
+            try:
+                val = float(loaded_model.predict(X)[0])
+            except Exception:
+                val = np.nan
+
+        val = min(val, 100.0)  # saturate at 100
+        preds.append(val)
+        predicted_cache[d_target] = val
+
+    return preds
+
+
+# ------------------------------------------------------------------------------
+#  pishkhor_for_chain 
+# ------------------------------------------------------------------------------
+def pishkhor_for_chain(
+    start_date: datetime.date,
+    output_df: pd.DataFrame,
+    chain_shift_models: List[str],
+    chain_blank_series: pd.Series,
+) -> List[float]:
+    """
+    Recursive SHIFT=0 predictions for the entire chain.
+    The chain_blank_series MUST be:
+        index = datetime.date
+        value = float (total available rooms across all buildings)
+    """
+    bestm0  = chain_shift_models[0]
+    mp      = f"results/Chain/{bestm0}_Chain0.pkl"
+
+    chain_cfg = {
+        "column_order": [
+            "Ramadan_dummy","Ashoora_dummy","Eid_Fetr_dummy","Norooz_dummy",
+            "Sizdah-be-Dar_dummy","Yalda_dummy","Last 5 Days of Esfand_dummy",
+            "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms",
+            "Lag5_EmptyRooms","Lag6_EmptyRooms","Lag7_EmptyRooms","Lag8_EmptyRooms",
+            "Lag9_EmptyRooms","Lag10_EmptyRooms",
+            "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6",
+            "Hol_holiday","Hol_none","Hol_religious_holiday"
+        ]
+    }
+
+    # ── Model loader ───────────────────────────────────────────────────────────
+    try:
+        with open(mp, "rb") as f:
+            loaded_chain = pickle.load(f)
+    except Exception:
+        return [np.nan] * 4
+
+    predicted_cache: Dict[datetime.date, float] = {}
+
+    # ── Inner feature builder ──────────────────────────────────────────────────
+    def build_chain0_features(tdate: datetime.date) -> pd.DataFrame:
+        feats: Dict[str, float] = {}
+
+        # Holiday flags
+        row_match = output_df.index[output_df["parsed_output_date"] == tdate].tolist()
+        def _sgn(row, key): return 1 if (row.get(key, None) in ("1", 1)) else 0
+
+        if row_match:
+            row = output_df.loc[row_match[0]]
+            feats["Ramadan_dummy"]  = _sgn(row, "IsStartOfRamadhan") or _sgn(row, "IsMidRamadhan") or _sgn(row, "IsEndOfRamadhan")
+            feats["Ashoora_dummy"]  = _sgn(row, "IsTasooaAshoora")
+            feats["Eid_Fetr_dummy"] = _sgn(row, "IsFetr")
+            feats["Norooz_dummy"]   = _sgn(row, "IsNorooz")
+            feats["Sizdah-be-Dar_dummy"] = _sgn(row, "Is13BeDar")
+            feats["Yalda_dummy"]    = _sgn(row, "Yalda_dummy")
+            feats["Last 5 Days of Esfand_dummy"] = _sgn(row, "IsLastDaysOfTheYear")
+            feats["Hol_holiday"]    = _sgn(row, "Hol_holiday")
+            feats["Hol_none"]       = _sgn(row, "Hol_none")
+            feats["Hol_religious_holiday"] = _sgn(row, "Hol_religious_holiday")
+        else:
+            for c in [
+                "Ramadan_dummy","Ashoora_dummy","Eid_Fetr_dummy","Norooz_dummy",
+                "Sizdah-be-Dar_dummy","Yalda_dummy","Last 5 Days of Esfand_dummy",
+                "Hol_holiday","Hol_none","Hol_religious_holiday"
+            ]:
+                feats[c] = 0
+
+        # Week-day one-hot
+        wd = tdate.weekday()
+        for i in range(7):
+            feats[f"WD_{i}"] = 1 if i == wd else 0
+
+        # Blank (chain-level) lagged features from PMS
+        def _blank(dt: datetime.date) -> float:
+            if dt in predicted_cache:
+                return predicted_cache[dt]
+            return float(chain_blank_series.get(dt, 0.0))
+
+        for lag in range(1, 11):
+            feats[f"Lag{lag}_EmptyRooms"] = _blank(tdate - datetime.timedelta(days=lag))
+
+        # Assemble DataFrame in correct order
+        row_vals = [feats.get(c, 0.0) for c in chain_cfg["column_order"]]
+        return pd.DataFrame([row_vals], columns=chain_cfg["column_order"])
+
+    # ── Recursive 4-day inference ──────────────────────────────────────────────
+    preds: List[float] = []
+    for shift in range(4):
+        d_target = start_date + datetime.timedelta(days=shift)
+        X_chain  = build_chain0_features(d_target)
+
+        # Dispatch by model-type
+        if bestm0 in {"holt_winters", "exp_smoothing"}:
+            val = forecast_univariate_statsmodels(loaded_chain, 0)
+        elif bestm0 == "moving_avg":
+            val = forecast_moving_avg(loaded_chain)
+        elif bestm0 == "ts_decomp_reg":
+            val = forecast_ts_decomp_reg(loaded_chain, X_chain, 0)
+        else:
+            try:
+                val = float(loaded_chain.predict(X_chain)[0])
+            except Exception:
+                val = np.nan
+
+        preds.append(val)
+        predicted_cache[d_target] = val
+
+    return preds
+
+
+##############################################################################
+#                MAIN PAGE: BEST MODELS + AGGREGATION 
+##############################################################################
+def main_page():
+    WEEKDAY_FA = {
+    0: "دوشنبه",
+    1: "سه‌شنبه",
+    2: "چهارشنبه",
+    3: "پنجشنبه",
+    4: "جمعه",
+    5: "شنبه",
+    6: "یکشنبه",
+    }
+
+    load_css()
+    st.image("tmoble.png", width=180)
+
+    # Refresh button to clear cached data
+    if st.button("به روز رسانی"):
+        st.cache_data.clear()
+        st.success("داده‌ها ریست شدند و مجدداً بارگیری خواهند شد.")
+
+    st.markdown('<div class="header">داشبورد پیش‌بینی</div>', unsafe_allow_html=True)
+
+    if "logged_in" not in st.session_state:
+        st.session_state.logged_in = False
+    if "logged_user" not in st.session_state:
+        st.session_state.logged_user = None
+
+    # ────────────────────────────────────────────────────────────────────────────
+    #  Dates & scoreboard
+    # ────────────────────────────────────────────────────────────────────────────
+    system_today   = datetime.datetime.now(tehran_tz).date()
+    jalali_today   = jdatetime.date.fromgregorian(date=system_today)
+    greg_str       = system_today.strftime("%Y/%m/%d")
+    jalali_str     = jalali_today.strftime("%Y/%m/%d")
+    st.markdown(
+        f'<div class="scoreboard">تاریخ میلادی: {greg_str} &nbsp;&nbsp;|&nbsp;&nbsp; تاریخ جلالی: {jalali_str}</div>',
+        unsafe_allow_html=True
+    )
+
+    # Scenario toggle
+    st.markdown(
+        "<div style='text-align: center; margin-bottom: -5px;'><small>سناریو را انتخاب کنید:</small></div>",
+        unsafe_allow_html=True
+    )
+    prediction_view_option = st.radio(
+        " ",
+        ["خوش‌بینانه", "واقع‌بینانه", "بدبینانه"],
+        index=1,
+        horizontal=True
+    )
+
+    # ────────────────────────────────────────────────────────────────────────────
+    #   Google-Sheet data (holidays, flags, etc.)
+    # ────────────────────────────────────────────────────────────────────────────
+    input_df, output_df = read_main_dfs()
+    if input_df.empty:
+        st.error("ورودی خالی است.")
+        return
+    if output_df.empty:
+        st.error("خروجی خالی است.")
+        return
+
+ 
+    matches = input_df.index[input_df["parsed_input_date"] == system_today].tolist()
+    idx_today_input = matches[0] if matches else None
+    if idx_today_input is None:
+        st.warning("برای تاریخ امروز سطری در ورودی یافت نشد (Input sheet).")
+
+    # ────────────────────────────────────────────────────────────────────────────
+    #   PMS-UAT server data: 30 days past, 10 days future (40-day window)
+    # ────────────────────────────────────────────────────────────────────────────
+    server_window_past    = 30
+    server_window_future  = 10
+    df_agg = get_availability_summary(
+        start_date = system_today - datetime.timedelta(days=server_window_past),
+        end_date   = system_today + datetime.timedelta(days=server_window_future),
+    )
+
+    avail_pivot        = build_availability_pivot(df_agg)                 
+    chain_blank_series = (
+    df_agg
+      .assign(date = df_agg["date"].dt.date)        
+      .groupby("date")["available_room_count"]
+      .sum()
+    )
+
+    # Current “Blank” (total empty rooms across chain) for today
+    blank_val_today = float(chain_blank_series.get(system_today, 0.0))
+
+    # ────────────────────────────────────────────────────────────────────────────
+    #   Resolve today-row in Output sheet (holiday flags)
+    # ────────────────────────────────────────────────────────────────────────────
+    match_out = output_df.index[output_df["parsed_output_date"] == system_today].tolist()
+    idx_today_output = match_out[0] if match_out else None
+    if idx_today_output is None:
+        st.warning("سطر منطبق در شیت خروجی برای امروز یافت نشد (Output sheet).")
+
+    # ────────────────────────────────────────────────────────────────────────────
+    #    Model maps & hotel configuration (unchanged, exact copy)
+    # ────────────────────────────────────────────────────────────────────────────
+    best_model_map = {
+      "Ashrafi": ["linear_reg","random_forest","random_forest","random_forest","random_forest","random_forest","lasso_reg"],
+      "Evin":    ["linear_reg","linear_reg","linear_reg","random_forest","random_forest","random_forest","random_forest"],
+      "Gandhi":  ["lasso_reg","lasso_reg","holt_winters","holt_winters","holt_winters","holt_winters","holt_winters"],
+      "Jordan":  ["ridge_reg","ridge_reg","lasso_reg","linear_reg","lasso_reg","linear_reg","lasso_reg"],
+      "Keshavarz": ["lasso_reg","random_forest","random_forest","ridge_reg","ridge_reg","ridge_reg","ridge_reg"],
+      "Koroush": ["ridge_reg","lasso_reg","ridge_reg","ridge_reg","random_forest","ridge_reg","ridge_reg"],
+      "Mirdamad": ["poisson_reg","linear_reg","lasso_reg","lasso_reg","lasso_reg","lasso_reg","poisson_reg"],
+      "Niloofar": ["random_forest","ridge_reg","ridge_reg","ridge_reg","ridge_reg","lasso_reg","ridge_reg"],
+      "Nofel":   ["lasso_reg","random_forest","poisson_reg","lasso_reg","poisson_reg","poisson_reg","poisson_reg"],
+      "Parkway": ["ridge_reg","random_forest","lasso_reg","lasso_reg","lasso_reg","lasso_reg","lasso_reg"],
+      "Pasdaran": ["linear_reg","linear_reg","linear_reg","random_forest","lasso_reg","poisson_reg","poisson_reg"],
+      "Toranj":  ["lasso_reg","poisson_reg","poisson_reg","poisson_reg","moving_avg","moving_avg","moving_avg"],
+      "Valiasr": ["linear_reg","linear_reg","linear_reg","linear_reg","linear_reg","linear_reg","random_forest"],
+      "Vila":    ["poisson_reg","lasso_reg","lasso_reg","ridge_reg","ridge_reg","lasso_reg","ridge_reg"]
+    }
+
+    chain_shift_models = ["linear_reg","xgboost","xgboost","xgboost","linear_reg","xgboost","linear_reg"]
+
+    HOTEL_CONFIG = {
+       "Ashrafi": {
+         "model_prefix": "Ashrafi",
+         "lag_cols": ["AshrafiN", "AshrafiS"],
+         "column_order": [
+            "Ramadan_dummy","Moharram_dummy","Eid_Fetr_dummy","Norooz_dummy","Sizdah-be-Dar_dummy",
+            "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms","Lag5_EmptyRooms",
+            "Lag6_EmptyRooms","Lag7_EmptyRooms","Lag8_EmptyRooms","Lag9_EmptyRooms","Lag10_EmptyRooms",
+            "Lag11_EmptyRooms","Lag12_EmptyRooms","WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6"
+         ]
+       },
+       "Evin": {
+         "model_prefix": "Evin",
+         "lag_cols": ["Evin"],
+         "column_order": [
+           "Ramadan_dummy","Shabe_Ghadr_dummy","Norooz_dummy","Sizdah-be-Dar_dummy",
+           "Esfand_dummy","Last 5 Days of Esfand_dummy",
+           "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms","Lag5_EmptyRooms",
+           "Lag6_EmptyRooms","Lag7_EmptyRooms","Lag8_EmptyRooms",
+           "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6"
+         ]
+       },
+       "Gandhi": {
+         "model_prefix": "Gandhi",
+         "lag_cols": ["Ghandi1", "Ghandi2"],
+         "column_order": [
+           "Ramadan_dummy","Moharram_dummy","Shabe_Ghadr_dummy","Eid_Fetr_dummy","Norooz_dummy",
+           "Sizdah-be-Dar_dummy","Yalda_dummy","Last 5 Days of Esfand_dummy",
+           "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms","Lag5_EmptyRooms",
+           "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6"
+         ]
+       },
+       "Jordan": {
+         "model_prefix": "Jordan",
+         "lag_cols": ["JordanN", "JordanS"],
+         "column_order": [
+           "Ramadan_dummy","Moharram_dummy","Eid_Fetr_dummy","Norooz_dummy","Sizdah-be-Dar_dummy",
+           "Esfand_dummy","Last 5 Days of Esfand_dummy",
+           "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms","Lag5_EmptyRooms",
+           "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6"
+         ]
+       },
+       "Keshavarz": {
+         "model_prefix": "Keshavarz",
+         "lag_cols": ["Keshavarz"],
+         "column_order": [
+           "Ramadan_dummy","Eid_Fetr_dummy","Norooz_dummy","Sizdah-be-Dar_dummy","Last 5 Days of Esfand_dummy",
+           "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms","Lag5_EmptyRooms",
+           "Lag6_EmptyRooms","Lag7_EmptyRooms","Lag8_EmptyRooms","Lag9_EmptyRooms",
+           "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6"
+         ]
+       },
+       "Koroush": {
+         "model_prefix": "Kourosh",
+         "lag_cols": ["Kourosh"],
+         "column_order": [
+           "Eid_Fetr_dummy","Sizdah-be-Dar_dummy","Yalda_dummy",
+           "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms","Lag5_EmptyRooms",
+           "Lag6_EmptyRooms","Lag7_EmptyRooms","Lag8_EmptyRooms",
+           "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6",
+           "Hol_holiday","Hol_none","Hol_religious_holiday"
+         ]
+       },
+       "Mirdamad": {
+         "model_prefix": "Mirdamad",
+         "lag_cols": ["Mirdamad1", "Mirdamad2"],
+         "column_order": [
+           "Moharram_dummy","Arbain_dummy","Shabe_Ghadr_dummy","Sizdah-be-Dar_dummy","Esfand_dummy",
+           "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms","Lag5_EmptyRooms",
+           "Lag6_EmptyRooms","Lag7_EmptyRooms","Lag8_EmptyRooms","Lag9_EmptyRooms","Lag10_EmptyRooms",
+           "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6"
+         ]
+       },
+       "Niloofar": {
+         "model_prefix": "Niloofar",
+         "lag_cols": ["NiloofarJacuzi", "Niloofar2R", "Niloofar104"],
+         "column_order": [
+           "Eid_Fetr_dummy",
+           "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms","Lag5_EmptyRooms",
+           "Lag6_EmptyRooms","Lag7_EmptyRooms","Lag8_EmptyRooms","Lag9_EmptyRooms",
+           "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6"
+         ]
+       },
+       "Nofel": {
+         "model_prefix": "Nofel",
+         "lag_cols": ["Nofel1", "Nofel2"],
+         "column_order": [
+           "Ramadan_dummy","Shabe_Ghadr_dummy","Norooz_dummy","Sizdah-be-Dar_dummy",
+           "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms","Lag5_EmptyRooms",
+           "Lag6_EmptyRooms","Lag7_EmptyRooms","Lag8_EmptyRooms","Lag9_EmptyRooms","Lag10_EmptyRooms",
+           "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6"
+         ]
+       },
+       "Parkway": {
+         "model_prefix": "Parkway",
+         "lag_cols": ["Parkway70", "Parkway80", "Parkway105", "Parkway6"],
+         "column_order": [
+           "Ramadan_dummy","Moharram_dummy","Eid_Fetr_dummy","Norooz_dummy","Sizdah-be-Dar_dummy","Yalda_dummy",
+           "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms","Lag5_EmptyRooms","Lag6_EmptyRooms",
+           "Lag7_EmptyRooms","Lag8_EmptyRooms","Lag9_EmptyRooms","Lag10_EmptyRooms","Lag11_EmptyRooms","Lag12_EmptyRooms","Lag13_EmptyRooms",
+           "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6"
+         ]
+       },
+       "Pasdaran": {
+         "model_prefix": "Pasdaran",
+         "lag_cols": ["Pasdaran1", "Pasdaran2"],
+         "column_order": [
+           "Ashoora_dummy","Norooz_dummy","Sizdah-be-Dar_dummy","Last 5 Days of Esfand_dummy",
+           "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms",
+           "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6"
+         ]
+       },
+       "Toranj": {
+         "model_prefix": "Toranj",
+         "lag_cols": ["Toranj"],
+         "column_order": [
+           "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms","Lag5_EmptyRooms",
+           "Lag6_EmptyRooms","Lag7_EmptyRooms","Lag8_EmptyRooms","Lag9_EmptyRooms","Lag10_EmptyRooms","Lag11_EmptyRooms",
+           "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6","Hol_holiday","Hol_none"
+         ]
+       },
+       "Valiasr": {
+         "model_prefix": "Valiasr",
+         "lag_cols": ["ValiasrN", "ValiasrS"],
+         "column_order": [
+           "Ramadan_dummy","Shabe_Ghadr_dummy","Norooz_dummy","Sizdah-be-Dar_dummy","Last 5 Days of Esfand_dummy",
+           "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms",
+           "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6"
+         ]
+       },
+       "Vila": {
+         "model_prefix": "Vila",
+         "lag_cols": ["VilaA", "VilaB"],
+         "column_order": [
+           "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms","Lag5_EmptyRooms",
+           "Lag6_EmptyRooms","Lag7_EmptyRooms","Lag8_EmptyRooms","Lag9_EmptyRooms",
+           "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6","Hol_holiday","Hol_none"
+         ]
+       }
+    }
+        # Build holiday flags, WD_, etc. as always. (Unchanged logic)...
+    if idx_today_output is not None:
+        row_output_today = output_df.loc[idx_today_output]
+
+        def outcol(c: str) -> int:
+            return safe_int(row_output_today.get(c, None))
+
+        Ramadan  = outcol("IsStartOfRamadhan") or outcol("IsMidRamadhan") or outcol("IsEndOfRamadhan")
+        Moharram = outcol("IsStartOfMoharam")  or outcol("IsMidMoharam")  or outcol("IsEndOfMoharam")
+        Ashoora  = outcol("IsTasooaAshoora")
+        Arbain   = outcol("IsArbain")
+        Fetr     = outcol("IsFetr")
+        Shabe    = outcol("IsShabeGhadr")
+        S13      = outcol("Is13BeDar")
+        eEarly   = outcol("IsEarlyEsfand")
+        eLate    = outcol("IsLateEsfand")
+        Esfand   = int(eEarly or eLate)
+        L5       = outcol("IsLastDaysOfTheYear")
+        Nrz      = outcol("IsNorooz")
+        HolHol   = outcol("Hol_holiday")
+        HolNone  = outcol("Hol_none")
+        HolRel   = outcol("Hol_religious_holiday")
+        Yalda    = outcol("Yalda_dummy")
+    else:
+        Ramadan = Moharram = Ashoora = Arbain = Fetr = Shabe = S13 = 0
+        Esfand  = L5 = Nrz = HolHol = HolNone = HolRel = Yalda = 0
+
+    holiday_map = {
+    "Ramadan_dummy": Ramadan,
+    "Moharram_dummy": Moharram,
+    "Ashoora_dummy": Ashoora,
+    "Arbain_dummy": Arbain,
+    "Eid_Fetr_dummy": Fetr,
+    "Shabe_Ghadr_dummy": Shabe,
+    "Sizdah-be-Dar_dummy": S13,
+    "Esfand_dummy": Esfand,
+    "Last 5 Days of Esfand_dummy": L5,
+    "Norooz_dummy": Nrz,
+    "Hol_holiday": HolHol,
+    "Hol_none": HolNone,
+    "Hol_religious_holiday": HolRel,
+    "Yalda_dummy": Yalda
+    }
+
+    dow   = system_today.weekday()
+    WD_   = {f"WD_{i}": 1 if i == dow else 0 for i in range(7)}
+
+    # ────────────────────────────────────────────────────────────────────────────────
+    #  Helper functions that pull lag values directly from PMS-server data
+    # ────────────────────────────────────────────────────────────────────────────────
+    def emptyrooms_for_hotel(hotel: str, when: datetime.date) -> float:
+        """Return available rooms for a given hotel & date from `avail_pivot`."""
+        try:
+            return float(avail_pivot.loc[when, hotel])
+        except Exception:
+            return 0.0
+
+    def blank_chain(when: datetime.date) -> float:
+        """Return total chain-wide empty rooms for a given date."""
+        return float(chain_blank_series.get(when, 0.0))
+
+    # ────────────────────────────────────────────────────────────────────────────────
+    #  Per-hotel shift predictor (shift = 0 … 6) – now uses PMS data for lags
+    # ────────────────────────────────────────────────────────────────────────────────
+    def predict_hotel_shift(hotel_name: str, shift: int) -> float:
+        """
+        Predict empty-room percentage for <hotel_name> at <system_today + shift>.
+        Lag features are sourced from the PMS server, NOT from the sheet.
+        """
+        best_model   = best_model_map[hotel_name][shift]
+        cfg          = HOTEL_CONFIG[hotel_name]
+        prefix       = cfg["model_prefix"]
+        final_order  = cfg["column_order"]
+
+        # ── Build feature dict ─────────────────────────────────────────────────────
+        feats: dict[str, float] = {**holiday_map, **WD_}
+
+        for lag in range(1, 16):
+            date_lag = system_today - datetime.timedelta(days=lag)
+            feats[f"Lag{lag}_EmptyRooms"] = emptyrooms_for_hotel(hotel_name, date_lag)
+
+        row_vals = [feats.get(col, 0.0) for col in final_order]
+        X        = pd.DataFrame([row_vals], columns=final_order)
+
+        # ── Load model & predict ───────────────────────────────────────────────────
+        model_path = f"results/{prefix}/{best_model}_{prefix}{shift}.pkl"
+        try:
+            with open(model_path, "rb") as fh:
+                model = pickle.load(fh)
+        except FileNotFoundError:
+            st.error(f"[Hotel {hotel_name}, shift={shift}] Model file not found: {model_path}")
+            return np.nan
+        except Exception as e:
+            st.error(f"[Hotel {hotel_name}, shift={shift}] Error loading model: {e}")
+            return np.nan
+
+        if best_model in {"holt_winters", "exp_smoothing"}:
+            return forecast_univariate_statsmodels(model, shift)
+        if best_model == "moving_avg":
+            return forecast_moving_avg(model)
+        if best_model == "ts_decomp_reg":
+            return forecast_ts_decomp_reg(model, X, shift)
+
+        try:
+            yhat = model.predict(X)
+            return float(yhat[0]) if len(yhat) else np.nan
+        except Exception as e:
+            st.error(f"[Hotel {hotel_name}, shift={shift}] Prediction error: {e}")
+            return np.nan
+
+    # ────────────────────────────────────────────────────────────────────────────────
+    #   Chain-wide shift predictor (shift = 0 … 6) – also PMS-based
+    # ────────────────────────────────────────────────────────────────────────────────
+    def predict_chain_shift(shift: int) -> float:
+        bestm = chain_shift_models[shift]
+        chain_cfg = {
+        "column_order": [
+            "Ramadan_dummy","Ashoora_dummy","Eid_Fetr_dummy","Norooz_dummy",
+            "Sizdah-be-Dar_dummy","Yalda_dummy","Last 5 Days of Esfand_dummy",
+            "Lag1_EmptyRooms","Lag2_EmptyRooms","Lag3_EmptyRooms","Lag4_EmptyRooms",
+            "Lag5_EmptyRooms","Lag6_EmptyRooms","Lag7_EmptyRooms","Lag8_EmptyRooms",
+            "Lag9_EmptyRooms","Lag10_EmptyRooms",
+            "WD_0","WD_1","WD_2","WD_3","WD_4","WD_5","WD_6",
+            "Hol_holiday","Hol_none","Hol_religious_holiday"
+        ]
+        }
+
+        feats = {**holiday_map, **WD_}
+
+        for lag in range(1, 11):
+            date_lag = system_today - datetime.timedelta(days=lag)
+            feats[f"Lag{lag}_EmptyRooms"] = blank_chain(date_lag)
+
+        row_vals = [feats.get(col, 0.0) for col in chain_cfg["column_order"]]
+        X_chain  = pd.DataFrame([row_vals], columns=chain_cfg["column_order"])
+
+        model_path = f"results/Chain/{bestm}_Chain{shift}.pkl"
+        try:
+            with open(model_path, "rb") as fh:
+                model = pickle.load(fh)
+        except FileNotFoundError:
+            st.error(f"[Chain shift={shift}] Model not found: {model_path}")
+            return np.nan
+        except Exception as e:
+            st.error(f"[Chain shift={shift}] Error loading model: {e}")
+            return np.nan
+
+        if bestm in {"holt_winters", "exp_smoothing"}:
+            return forecast_univariate_statsmodels(model, shift)
+        if bestm == "moving_avg":
+            return forecast_moving_avg(model)
+        if bestm == "ts_decomp_reg":
+            return forecast_ts_decomp_reg(model, X_chain, shift)
+
+        try:
+            yhat = model.predict(X_chain)
+            return float(yhat[0]) if len(yhat) else np.nan
+        except Exception as e:
+            st.error(f"Prediction error for chain model {model_path}: {e}")
+            return np.nan
+
+    # ────────────────────────────────────────────────────────────────────────────────
+    #  Convenience label helper
+    # ────────────────────────────────────────────────────────────────────────────────
+    def get_day_label(shift: int) -> str:
+        return {0: "امروز", 1: "فردا", 2: "پسفردا"}.get(shift, "سه روز بعد")
+
+    pickup_df        = get_data_from_pickup_sheet()                # ← keep as-is
+    pickup_pivot_df  = build_pickup_pivot(pickup_df)               # ← keep as-is
+
+    day_results: list[dict[str, object]] = []
+    hotels_list = list(best_model_map.keys())
+
+    for shift in range(4):
+        # ── Per-hotel model predictions for this shift ─────────────────────────────
+        hotel_preds = {h: predict_hotel_shift(h, shift) for h in hotels_list}
+        sum_houses  = sum(v for v in hotel_preds.values() if not pd.isna(v))
+
+        # ── Chain-level prediction ────────────────────────────────────────────────
+        chain_pred = predict_chain_shift(shift)
+        if chain_pred is None or np.isnan(chain_pred):
+            chain_pred = 0.0
+
+        # ── PMS-derived “Blank” for the future day  ────────────
+        future_date   = system_today + datetime.timedelta(days=shift)
+        future_blank  = float(chain_blank_series.get(future_date, 0.0))
+
+        # ── Week-day label (Persian) ──────────────────────────────────────────────
+        week_day_idx = future_date.weekday()             # Monday=0 … Sunday=6
+        week_day     = WEEKDAY_FA.get(week_day_idx, "-") # نام فارسی
+
+
+        # ── Combine predictions (identical logic, minus “Hold/uncertain”) ─────────
+        whole_chain = min(chain_pred, future_blank)
+        robust      = 0.5 * (sum_houses + whole_chain)
+
+        # ── Pickup model (unchanged) ──────────────────────────────────────────────
+        arrival_date_for_shift = future_date
+        pickup_pred = predict_pickup_for_shift(arrival_date_for_shift, pickup_pivot_df, shift)
+        if pickup_pred is not None and not np.isnan(pickup_pred):
+            pickup_pred = int(math.ceil(pickup_pred))
+        else:
+            pickup_pred = 0
+
+        displayed_pred = int(min(int(round(robust)), int(round(future_blank))))
+
+        # ── Collect daily dict ────────────────────────────────────────────────────
+        day_results.append({
+            "shift": shift,
+            "label": get_day_label(shift),
+            "روز هفته": week_day,
+            "تعداد خالی فعلی": int(round(future_blank)),
+            "پیش بینی تفکیکی": int(round(sum_houses)),
+            "پیش‌بینی کلی": int(round(whole_chain)),
+            "پیش بینی نهایی": int(round(robust)),
+            "مدل پیکآپ": pickup_pred,
+            "پیش بینی نمایشی": displayed_pred,
+            "hotel_preds": hotel_preds
+        })
+
+    # ────────────────────────────────────────────────────────────────────────────────
+    #  (recursive day-by-day) predictions using PMS-based helpers
+    # ────────────────────────────────────────────────────────────────────────────────
+    pishkhor_hotels_dict: dict[str, list[float]] = {}
+    for h_ in hotels_list:
+        p4 = pishkhor_for_hotel(
+            h_,                          # hotel name
+            system_today,                # start_date
+            output_df,                   # holiday flags
+            best_model_map,
+            HOTEL_CONFIG,
+            avail_pivot                  
+        )
+        pishkhor_hotels_dict[h_] = p4
+
+    # Sum across hotels for each of the 4 days
+    pishkhor_telefiqi: list[float] = []
+    for i in range(4):
+        total_val = 0.0
+        for h_ in hotels_list:
+            v = pishkhor_hotels_dict[h_][i]
+            if not pd.isna(v):
+                total_val += v
+        pishkhor_telefiqi.append(total_val)
+
+    # Chain-level “پیشخور” prediction
+    pishkhor_chain_vals = pishkhor_for_chain(
+        system_today,
+        output_df,
+        chain_shift_models,
+        chain_blank_series        
+    )
+
+    # ────────────────────────────────────────────────────────────────────────────────
+    #  Merge predictions back into day_results (+ optimistic / …)
+    # ────────────────────────────────────────────────────────────────────────────────
+    for i in range(4):
+        day_results[i]["پیش‌بینی پیشخور تلفیقی"] = int(round(pishkhor_telefiqi[i]))
+        day_results[i]["پیش‌بینی پیشخور کلی"]   = int(round(pishkhor_chain_vals[i]))
+
+        pf_tel = day_results[i]["پیش‌بینی پیشخور تلفیقی"]
+        pf_kli = day_results[i]["پیش‌بینی پیشخور کلی"]
+        pn     = day_results[i]["پیش بینی نمایشی"]
+        cur    = day_results[i]["تعداد خالی فعلی"]
+
+        day_results[i]["پیش‌بینی نهایی خوشبینانه"]  = int(round(min(cur, min(pf_tel, pf_kli, pn))))
+        day_results[i]["پیش‌بینی نهایی بدبینانه"]   = int(round(min(cur, max(pf_tel, pf_kli, pn))))
+        avg_val = (pf_tel + pf_kli + pn) / 3
+        day_results[i]["پیش‌بینی نهایی واقع‌بینانه"] = int(round(min(cur, round(avg_val))))
+
+        # ---------------------------------------------------------------------
+    # DISPLAY: عدد پیش‌بینی 
+    # ---------------------------------------------------------------------
+    st.subheader("عدد پیش‌بینی")
+    cols = st.columns(4)
+    pred_gradient = "linear-gradient(135deg, #FFFFFF, #F0F0F0)"
+
+    for idx, (col, row) in enumerate(zip(cols, day_results)):
+
+        # Apply user toggle to select which final prediction to show
+        if prediction_view_option == "خوش‌بینانه":
+            display_val = row["پیش‌بینی نهایی خوشبینانه"]
+        elif prediction_view_option == "بدبینانه":
+            display_val = row["پیش‌بینی نهایی بدبینانه"]
+        else:
+            display_val = row["پیش‌بینی نهایی واقع‌بینانه"]
+
+        extra_content = f"""
+        <div id="pred-extra-{idx}" class="extra-text">
+            <div>خالی فعلی: {row['تعداد خالی فعلی']}</div>
+        </div>
+        """
+
+        html_code = f"""
+        <html>
+        <head>
+        <style>
+            .score-box {{
+                background: {pred_gradient};
+                color: #333;
+                cursor: pointer;
+                padding: 20px;
+                border-radius: 5px;
+                text-align: center;
+                width: 100%;
+                box-sizing: border-box;
+            }}
+            .extra-text {{
+                display: none;
+                margin-top: 10px;
+                font-size: 14px;
+                font-family: "Tahoma", sans-serif !important;
+            }}
+        </style>
+        <script>
+            function togglePredExtra_{idx}() {{
+                var x = document.getElementById("pred-extra-{idx}");
+                if (x.style.display === "none" || x.style.display === "") {{
+                    x.style.display = "block";
+                }} else {{
+                    x.style.display = "none";
+                }}
+            }}
+        </script>
+        </head>
+        <body>
+            <div class="score-box" onclick="togglePredExtra_{idx}()">
+                <div><b>{row['label']}</b></div>
+                <div><b>{row['روز هفته']}</b></div>
+                <div><b>پیش‌بینی: {display_val}</b></div>
+                {extra_content}
+            </div>
+        </body>
+        </html>
+        """
+        with col:
+            components.html(html_code, height=150, width=200)
+
+    # ---------------------------------------------------------------------
+    # DISPLAY: وضعیت بر اساس نرخ اشغال (with toggle)
+    # ---------------------------------------------------------------------
+    st.subheader("وضعیت بر اساس نرخ اشغال")
+    cols = st.columns(4)
+    for idx, (col, row) in enumerate(zip(cols, day_results)):
+        card_date      = datetime.datetime.now(tehran_tz).date() + datetime.timedelta(days=row['shift'])
+        target_weekday = card_date.weekday()
+        weekday_label  = row["روز هفته"] if "روز هفته" in row else ""
+
+        avg_month  = int(round(compute_avg_for_weekday(input_df, target_weekday, 30)))
+        avg_season = int(round(compute_avg_for_weekday(input_df, target_weekday, 90)))
+        avg_year   = int(round(compute_avg_for_weekday(input_df, target_weekday, 365)))
+
+        extra_text = f"""
+        {weekday_label}‌های ماه: {avg_month:.0f}<br>
+        {weekday_label}‌های فصل: {avg_season:.0f}<br>
+        {weekday_label}‌های سال: {avg_year:.0f}
+        """
+
+        # same toggle for color
+        if prediction_view_option == "خوش‌بینانه":
+            pwc = row["پیش‌بینی نهایی خوشبینانه"]
+        elif prediction_view_option == "بدبینانه":
+            pwc = row["پیش‌بینی نهایی بدبینانه"]
+        else:
+            pwc = row["پیش‌بینی نهایی واقع‌بینانه"]
+
+        colors_list = [fuzz_color(pwc)]
+        final_code  = union_fuzzy(colors_list)
+        hex_col     = color_code_to_hex(final_code)
+        gradient    = f"linear-gradient(135deg, {hex_col}, {hex_col})"
+        text_color  = "#333" if hex_col in ["#4A90E2", "#7ED321", "#F5A623"] else "#fff"
+
+        html_code = f"""
+        <html>
+        <head>
+        <style>
+            .score-box {{
+                background: {gradient};
+                color: {text_color};
+                cursor: pointer;
+                padding: 20px;
+                border-radius: 5px;
+                text-align: center;
+                font-weight: bold;
+                width: 100%;
+                box-sizing: border-box;
+            }}
+            .extra-text {{
+                display: none;
+                margin-top: 10px;
+                font-size: 12px;
+                font-family: "Tahoma", sans-serif !important;
+            }}
+        </style>
+        <script>
+            function toggleExtra_{idx}() {{
+                var x = document.getElementById("extra-{idx}");
+                if (x.style.display === "none" || x.style.display === "") {{
+                    x.style.display = "block";
+                }} else {{
+                    x.style.display = "none";
+                }}
+            }}
+        </script>
+        </head>
+        <body>
+            <div class="score-box" onclick="toggleExtra_{idx}()">
+                <b>{row['label']}</b>
+                <div id="extra-{idx}" class="extra-text">
+                    {extra_text}
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        with col:
+            components.html(html_code, height=150, width=200)
+
+    # (No changes needed for وضعیت بر اساس آمار رزرو)
+    st.subheader("وضعیت بر اساس آمار رزرو")
+    cols = st.columns(4)
+    for idx, (col, row) in enumerate(zip(cols, day_results)):
+        arrival_date = datetime.datetime.now(tehran_tz).date() + datetime.timedelta(days=row['shift'])
+        count0 = get_pickup_value_for_day(pickup_pivot_df, arrival_date, 0)
+        count1 = get_pickup_value_for_day(pickup_pivot_df, arrival_date, 1)
+        count2 = get_pickup_value_for_day(pickup_pivot_df, arrival_date, 2)
+        count3 = get_pickup_value_for_day(pickup_pivot_df, arrival_date, 3)
+        
+        if row['shift'] == 0:
+            extra_content = f"""
+            رزرو همان روز: {count0}<br>
+            رزرو از یک روز قبل: {count1}<br>
+            رزرو از دو روز قبل: {count2}<br>
+            رزرو از سه روز قبل: {count3}
+            """
+        elif row['shift'] == 1:
+            extra_content = f"""
+            رزرو از یک روز قبل: {count1}<br>
+            رزرو از دو روز قبل: {count2}<br>
+            رزرو از سه روز قبل: {count3}
+            """
+        elif row['shift'] == 2:
+            extra_content = f"""
+            رزرو از دو روز قبل: {count2}<br>
+            رزرو از سه روز قبل: {count3}
+            """
+        elif row['shift'] == 3:
+            extra_content = f"""
+            رزرو از سه روز قبل: {count3}
+            """
+        else:
+            extra_content = ""
+        
+        pickup_val = row['مدل پیکآپ']
+        color_val = (pickup_val)
+        
+        c_code = fuzz_color(color_val)
+        final_code = union_fuzzy([c_code])
+        hex_col = color_code_to_hex(final_code)
+        gradient = f"linear-gradient(135deg, {hex_col}, {hex_col})"
+        if hex_col in ["#4A90E2", "#7ED321", "#F5A623"]:
+            text_color = "#333"
+        else:
+            text_color = "#fff"
+        
+        html_code = f"""
+        <html>
+        <head>
+        <style>
+            .score-box {{
+            background: {gradient};
+            color: {text_color};
+            cursor: pointer;
+            padding: 20px;
+            border-radius: 5px;
+            text-align: center;
+            font-weight: bold;
+            width: 100%;
+            box-sizing: border-box;
+            }}
+            .extra-text {{
+            display: none;
+            margin-top: 10px;
+            font-size: 12px;
+            }}
+        </style>
+        <script>
+            function toggleExtra_{idx}() {{
+                var x = document.getElementById("extra-{idx}");
+                if (x.style.display === "none" || x.style.display === "") {{
+                    x.style.display = "block";
+                }} else {{
+                    x.style.display = "none";
+                }}
+            }}
+        </script>
+        </head>
+        <body>
+        <div class="score-box" onclick="toggleExtra_{idx}()">
+            <b>{row['label']}</b>
+            <div id="extra-{idx}" class="extra-text">
+            {extra_content}
+            </div>
+        </div>
+        </body>
+        </html>
+        """
+        with col:
+            components.html(html_code, height=150, width=200)
+    
+    st.subheader("مناسبت‌های فصلی ویژه امروز")
+    notes = []
+    if idx_today_output is not None:
+        row_output_today = output_df.loc[idx_today_output]
+        def outcol(c):
+            return safe_int(row_output_today.get(c, None))
+        if (outcol("IsStartOfRamadhan") or outcol("IsMidRamadhan") or outcol("IsEndOfRamadhan")):
+            notes.append("ماه رمضان")
+        if (outcol("IsStartOfMoharam") or outcol("IsMidMoharam") or outcol("IsEndOfMoharam")):
+            notes.append("ماه محرم")
+        if outcol("IsHoliday"):
+            notes.append("تعطیلات رسمی")
+        if outcol("IsTasooaAshoora"):
+            notes.append("تاسوعا/عاشورا")
+        if outcol("IsArbain"):
+            notes.append("اربعین")
+        if outcol("IsFetr"):
+            notes.append("عید فطر")
+        if outcol("IsShabeGhadr"):
+            notes.append("شب قدر")
+        if outcol("Is13BeDar"):
+            notes.append("سیزده به در")
+        if (outcol("IsEarlyEsfand") or outcol("IsLateEsfand") or outcol("IsLastDaysOfTheYear")):
+            notes.append("اسفند")
+        if outcol("IsNorooz"):
+            notes.append("نوروز")
+
+    for n in notes:
+        st.write(n)
+    
+    st.write("---")
+    # ---------------------------------------------------------------------
+# DISPLAY: مجموعه‌های بحرانی بر اساس پیش‌بینی
+# ---------------------------------------------------------------------
+    st.subheader("مجموعه‌های بحرانی بر اساس پیش‌بینی")
+    for day_res in day_results:
+        shift                = day_res["shift"]
+        label                = day_res["label"]
+        hotel_preds_for_shift: dict[str, float] = day_res.get("hotel_preds", {})
+
+        # فقط هتل‌هایی که پیش‌بینی خالیِ بیش از ۳ واحد دارند
+        filtered_hotels = [
+            (h, val) for h, val in hotel_preds_for_shift.items()
+            if (not pd.isna(val)) and (val > 3)
+        ]
+        if not filtered_hotels:
+            continue
+
+        total_empties = sum(val for _, val in filtered_hotels)
+        if total_empties <= 0:
+            continue
+
+        filtered_hotels.sort(key=lambda x: x[1], reverse=True)
+
+        cutoff          = 0.80 * total_empties   # ۸۰٪ قاعده پارتو
+        cumsum          = 0.0
+        critical_hotels = []
+        for hname, empties in filtered_hotels:
+            cumsum += empties
+            critical_hotels.append((hname, empties))
+            if cumsum >= cutoff:
+                break
+
+        if not critical_hotels:
+            continue
+
+        lines = [f"**مجموعه‌های بحرانی برای {label}:**\n"]
+
+        future_date = system_today + datetime.timedelta(days=shift)
+        for wh, pred_val in critical_hotels:
+            # تعداد خالی فعلی از دیتابیس PMS
+            current_empties = emptyrooms_for_hotel(wh, future_date)
+            if pd.isna(current_empties):
+                current_empties = 0.0
+
+            fa_name = hotel_name_map.get(wh, wh)   # نام فارسی در صورت وجود
+
+            if int(round(current_empties)) <= 2:
+                continue
+
+            show_val = min(pred_val, current_empties)
+            if current_empties - show_val <= 2:
+                show_val = max(0, show_val - 3)
+            if show_val <= 2:
+                continue
+
+            lines.append(
+                f"مجموعه **{fa_name}** با پیش‌بینی **{int(round(show_val))}** خالی برای {label} بحرانی است. "
+                f"تعداد خالی فعلی این مجموعه، **{int(round(current_empties))}** است.\n"
+            )
+
+        final_text = "\n".join(lines)
+        st.info(final_text)
+
+    st.write("---")
+    st.subheader("ثبت پیش‌بینی خبرگان")
+    # Replace hard-coded passwords with values from st.secrets["tmol_passwords"]
+    user_passwords = {
+        "محمدرضا ایدرم":   "8812318406",
+        "فرشته فرجی":      "9La68@ZM",
+        "آرش پیریایی":     "BgK3$02V",
+        "فرزین سوری":      "Xr13L&nV",
+        "احسان همایونی":   "TpZ#84rQ",
+        "امیرحسین محتشم":  "Su89W4u3qvf8",
+        "فرهاد حیدری":     "farhad10828",
+    }
+
+
+    user_column_map = {
+        "محمدرضا ایدرم": {
+            "columns": [
+                "idrom today", "idrom tomorrow", "idrom 2days", "idrom 3days",
+                "idrom today reason", "idrom tomorrow reason", "idrom 2days reason", "idrom 3days reason"
+            ],
+            "time_col": "Idrom Time"
+        },
+        "فرشته فرجی": {
+            "columns": [
+                "fereshteh today", "fereshteh tomorrow", "fereshteh 2days", "fereshteh 3days",
+                "fereshteh today reason", "fereshteh tomorrow reason", "fereshteh 2days reason", "fereshteh 3days reason"
+            ],
+            "time_col": "Fereshteh Time"
+        },
+        "آرش پیریایی": {
+            "columns": [
+                "Arash today", "Arash tomorrow", "Arash 2days", "Arash 3days",
+                "Arash today reason", "Arash tomorrow reason", "Arash 2days reason", "Arash 3days reason"
+            ],
+            "time_col": "Arash Time"
+        },
+        "فرزین سوری": {
+            "columns": [
+                "Farzin today", "Farzin tomorrow", "Farzin 2days", "Farzin 3days",
+                "Farzin today reason", "Farzin tomorrow reason", "Farzin 2days reason", "Farzin 3days reason"
+            ],
+            "time_col": "Farzin Time"
+        },
+        "احسان همایونی": {
+            "columns": [
+                "Ehsan today", "Ehsan tomorrow", "Ehsan 2days", "Ehsan 3days",
+                "Ehsan today reason", "Ehsan tomorrow reason", "Ehsan 2days reason", "Ehsan 3days reason"
+            ],
+            "time_col": "Ehsan Time"
+        },
+         "امیرحسین محتشم": {
+            "columns": [
+                "Mohtasham today", "Mohtasham tomorrow", "Mohtasham 2days", "Mohtasham 3days",
+                "Mohtasham today reason", "Mohtasham tomorrow reason", "Mohtasham 2days reason", "Mohtasham 3days reason"
+            ],
+            "time_col": "Mohtasham Time"
+        },
+        "فرهاد حیدری": {
+            "columns": [
+                "Farhad today", "Farhad tomorrow", "Farhad 2days", "Farhad 3days",
+                "Farhad today reason", "Farhad tomorrow reason", "Farhad 2days reason", "Farhad 3days reason"
+            ],
+            "time_col": "Farhad Time"
+        }
+    }
+
+    if not st.session_state.logged_in:
+        st.markdown("### ورود به سیستم")
+        chosen_user = st.selectbox("نام خودتان را از این منو انتخاب کنید", list(user_passwords.keys()))
+        typed_pw = st.text_input("رمز عبور:", type="password")
+        login_clicked = st.button("تایید هویت")
+        if login_clicked:
+            if typed_pw == user_passwords.get(chosen_user, ""):
+                st.session_state.logged_in = True
+                st.session_state.logged_user = chosen_user
+                st.success(f"{chosen_user} خوش آمدید! شما می‌توانید پیش‌بینی خود را ثبت کنید.")
+                st.button("شروع پیش‌بینی")
+            else:
+                st.error("رمز عبور اشتباه است!")
+    else:
+        logout_clicked = st.button("خروج")
+        if logout_clicked:
+            st.session_state.logged_in = False
+            st.session_state.logged_user = None
+            st.warning("شما خارج شدید. لطفاً دوباره وارد شوید.")
+            st.button("ورود مجدد")
+        else:
+            st.write(f"شما وارد شده‌اید به عنوان: **{st.session_state.logged_user}**")
+            with st.form("prediction_form"):
+                day_labels = ["امروز", "فردا", "پسفردا", "سه روز بعد"]
+                user_preds = []
+                user_reasons = []
+                for i, dlabel in enumerate(day_labels):
+                    pred_val = st.number_input(f"پیش‌بینی برای {dlabel}", min_value=0, step=1, key=f"user_pred_{i}")
+                    reason_val = st.text_input(f"دلیل پیش‌بینی برای {dlabel}", key=f"user_reason_{i}")
+                    user_preds.append(pred_val)
+                    user_reasons.append(reason_val)
+                submit_pred_button = st.form_submit_button("ثبت پیش‌بینی‌ها")
+                if submit_pred_button:
+                    SCOPES_WRITE = ["https://www.googleapis.com/auth/spreadsheets"]
+                    creds_write = load_gcp_creds(SCOPES_WRITE)
+                    client_write = gspread.authorize(creds_write)
+                    second_spreadsheet_id = "1Pz_zyb7DAz6CnvFrqv77uBP2Z_L7OnjOZkW0dj3m3HY"
+                    sheet_write = client_write.open_by_key(second_spreadsheet_id).worksheet("Sheet1")
+                    all_records = sheet_write.get_all_records()
+                    full_cols = [
+                        "Date",
+                        "idrom today", "idrom tomorrow", "idrom 2days", "idrom 3days",
+                        "idrom today reason", "idrom tomorrow reason", "idrom 2days reason", "idrom 3days reason",
+                        "fereshteh today", "fereshteh tomorrow", "fereshteh 2days", "fereshteh 3days",
+                        "fereshteh today reason", "fereshteh tomorrow reason", "fereshteh 2days reason", "fereshteh 3days reason",
+                        "Arash today", "Arash tomorrow", "Arash 2days", "Arash 3days",
+                        "Arash today reason", "Arash tomorrow reason", "Arash 2days reason", "Arash 3days reason",
+                        "Farzin today", "Farzin tomorrow", "Farzin 2days", "Farzin 3days",
+                        "Farzin today reason", "Farzin tomorrow reason", "Farzin 2days reason", "Farzin 3days reason",
+                        "Ehsan today", "Ehsan tomorrow", "Ehsan 2days", "Ehsan 3days",
+                        "Ehsan today reason", "Ehsan tomorrow reason", "Ehsan 2days reason", "Ehsan 3days reason",
+                        "Mohtasham today", "Mohtasham tomorrow", "Mohtasham 2days", "Mohtasham 3days",
+                        "Mohtasham today reason", "Mohtasham tomorrow reason", "Mohtasham 2days reason", "Mohtasham 3days reason",
+                        "Farhad today", "Farhad tomorrow", "Farhad 2days", "Farhad 3days",
+                        "Farhad today reason", "Farhad tomorrow reason", "Farhad 2days reason", "Farhad 3days reason",
+                        "System opt today","System opt tomorrow","System opt 2days","System opt 3days",
+                        "System prac today","System prac tomorrow","System prac 2days","System prac 3days",
+                        "System pes today","System pes tomorrow","System pes 2days","System pes 3days",
+                        "Idrom Time", "Fereshteh Time", "Arash Time", "Farzin Time", "Ehsan Time","Mohtasham Time","Farhad Time"
+                    ]
+                    df_second = pd.DataFrame(all_records)
+                    if df_second.empty:
+                        df_second = pd.DataFrame(columns=full_cols)
+                    else:
+                        for c in full_cols:
+                            if c not in df_second.columns:
+                                df_second[c] = ""
+                    today_str = system_today.strftime("%Y/%m/%d")
+                    matching_idx = df_second.index[df_second["Date"] == today_str].tolist()
+                    if len(matching_idx) == 0:
+                        new_row = {col: "" for col in full_cols}
+                        new_row["Date"] = today_str
+                        new_row_df = pd.DataFrame([new_row], columns=full_cols)
+                        df_second = pd.concat([df_second, new_row_df], ignore_index=True)
+                        row_index = df_second.index[-1]
+                    else:
+                        row_index = matching_idx[0]
+                    user_info = user_column_map[st.session_state.logged_user]
+                    user_cols = user_info["columns"]
+                    for i in range(4):
+                        df_second.at[row_index, user_cols[i]] = user_preds[i]
+                        df_second.at[row_index, user_cols[i+4]] = user_reasons[i]
+                    now_str = datetime.datetime.now().strftime("%H:%M:%S")
+                    df_second.at[row_index, user_info["time_col"]] = now_str
+                    df_second = df_second[full_cols]
+                    system_opt_cols = ["System opt today","System opt tomorrow","System opt 2days","System opt 3days"]
+                    system_prac_cols = ["System prac today","System prac tomorrow","System prac 2days","System prac 3days"]
+                    system_pes_cols  = ["System pes today","System pes tomorrow","System pes 2days","System pes 3days"]
+                    
+                    for i in range(4):
+                        # optimistic (خوشبینانه)
+                        if df_second.at[row_index, system_opt_cols[i]] =="":
+                            df_second.at[row_index, system_opt_cols[i]] = day_results[i]["پیش‌بینی نهایی خوشبینانه"]
+                        # realistic (واقع‌بینانه)
+                        if df_second.at[row_index, system_prac_cols[i]] == "":
+                            df_second.at[row_index, system_prac_cols[i]] = str(day_results[i]["پیش‌بینی نهایی واقع‌بینانه"])
+
+                        # pessimistic (بدبینانه)
+                        if df_second.at[row_index, system_pes_cols[i]] == "":
+                            df_second.at[row_index, system_pes_cols[i]] = day_results[i]["پیش‌بینی نهایی بدبینانه"]
+
+                    data_to_write = df_second.values.tolist()
+                    data_to_write.insert(0, df_second.columns.tolist())
+                    sheet_write.clear()
+                    sheet_write.update(
+                        "A1",
+                        data_to_write,
+                        value_input_option="RAW"
+                    )
+                    st.success("پیش‌بینی شما با موفقیت ثبت شد.")
+        # ---------------------------------------------------------------------
+    
+    # ---------------------------------------------------------------------
+    # Expert performance table (Sheet1+Sheet2) — directional override metric
+    # ---------------------------------------------------------------------
+    st.write("---")
+    
+    # 1) Load Google-Sheets ------------------------------------------------
+    creds = load_gcp_creds(["https://www.googleapis.com/auth/spreadsheets.readonly"])
+    gc = gspread.authorize(creds)
+    
+    df_pred = pd.DataFrame(
+        gc.open_by_key("1Pz_zyb7DAz6CnvFrqv77uBP2Z_L7OnjOZkW0dj3m3HY")
+          .worksheet("Sheet1").get_all_records()
+    )
+    df_perf = pd.DataFrame(
+        gc.open_by_key("1Pz_zyb7DAz6CnvFrqv77uBP2Z_L7OnjOZkW0dj3m3HY")
+          .worksheet("Sheet2").get_all_records()
+    )
+    
+    # 2) Dates & helpers ---------------------------------------------------
+    df_pred["pred_date"] = pd.to_datetime(df_pred["Date"], errors="coerce").dt.date
+    df_perf["perf_date"] = pd.to_datetime(df_perf["Date"], errors="coerce").dt.date
+    actual_map   = dict(zip(df_perf["perf_date"],
+                            pd.to_numeric(df_perf["Actual"], errors="coerce")))
+    system_today = datetime.datetime.now(tehran_tz).date()
+    total_rows   = df_pred["pred_date"].notna().sum()          # ثابت برای همه
+    eps = 1e-6
+    
+    # 3) Column maps -------------------------------------------------------
+    HORIZONS = ["today","tomorrow","2days","3days"]
+    SYS_COLS = [f"System prac {h}" for h in HORIZONS]
+    expert_cols = {
+        "محمدرضا ایدرم":  [f"idrom {h}"     for h in HORIZONS],
+        "فرشته فرجی":     [f"fereshteh {h}" for h in HORIZONS],
+        "آرش پیریایی":    [f"Arash {h}"     for h in HORIZONS],
+        "فرزین سوری":     [f"Farzin {h}"    for h in HORIZONS],
+        "احسان همایونی":  [f"Ehsan {h}"     for h in HORIZONS],
+        "امیرحسین محتشم": [f"Mohtasham {h}" for h in HORIZONS],
+        "فرهاد حیدری":    [f"Farhad {h}"    for h in HORIZONS],
+    }
+    count_cols  = {"محمدرضا ایدرم":"Idrom count","فرشته فرجی":"fereshteh count",
+                   "آرش پیریایی":"arash count","فرزین سوری":"farzin count",
+                   "احسان همایونی":"ehsan count","امیرحسین محتشم":"mohtasham count",
+                   "فرهاد حیدری":"farhad count"}
+    timing_cols = {"محمدرضا ایدرم":"Idrom timing","فرشته فرجی":"fereshteh timing",
+                   "آرش پیریایی":"arash timing","فرزین سوری":"farzin timing",
+                   "احسان همایونی":"ehsan timing","امیرحسین محتشم":"mohtasham timing",
+                   "فرهاد حیدری":"farhad timing"}
+    
+    # 4) colour utils ------------------------------------------------------
+    COLOR_NAME = {0:"آبی",1:"سبز",2:"زرد",3:"قرمز",4:"مشکی"}
+    def colour_of(v):
+        try: return fuzz_color(float(v), total=330)
+        except: return 4
+    def cname(i:int): return COLOR_NAME.get(int(i),"نامعلوم")
+    
+    # 5) row reward (+1/-1/0) ---------------------------------------------
+    def row_reward(c_sys,c_exp,c_act):
+        if c_exp==c_sys: return 0
+        return 1 if abs(c_exp-c_act)<abs(c_sys-c_act) else -1
+    
+    # 6) horizon stats -----------------------------------------------------
+    def horizon_stats(name,h):
+        lag  = h+1
+        colE,colS = expert_cols[name][h], SYS_COLS[h]
+        sub = df_pred[df_pred["pred_date"]+datetime.timedelta(days=lag)<=system_today].copy()
+        sub["tgt"]    = sub["pred_date"]+pd.to_timedelta(h,unit="D")
+        sub["actual"] = sub["tgt"].map(actual_map)
+        sub["exp"]    = pd.to_numeric(sub[colE],errors="coerce")
+        sub["sys"]    = pd.to_numeric(sub[colS],errors="coerce")
+        sub = sub.dropna(subset=["actual","exp","sys"])
+        if sub.empty:
+            return dict(days=0,override=0,correct=0,wrong=0,fuzzy=4,mse=None,final=0.0)
+    
+        c_act,c_exp,c_sys = map(colour_of,sub["actual"]), map(colour_of,sub["exp"]), map(colour_of,sub["sys"])
+        c_act=list(c_act); c_exp=list(c_exp); c_sys=list(c_sys)
+    
+        rewards=[row_reward(s,e,a) for s,e,a in zip(c_sys,c_exp,c_act)]
+        ov=[r!=0 for r in rewards]; corr=[r==1 for r in rewards]; wrong=[r==-1 for r in rewards]
+        override_score = sum(rewards)/total_rows
+        fuzzy_err = (pd.Series(c_exp)-pd.Series(c_act)).abs().mean()
+        final = override_score*(4-fuzzy_err)
+        mse   = ((sub["exp"]-sub["actual"])**2).mean()
+    
+        return dict(days=len(sub),override=sum(ov),correct=sum(corr),wrong=sum(wrong),
+                    fuzzy=round(float(fuzzy_err),3),mse=round(float(mse),3),
+                    final=round(float(final),4))
+    
+    # 7) build performance summary ----------------------------------------
+    records=[]
+    for n in expert_cols:
+        st4=[horizon_stats(n,i) for i in range(4)]
+        attend=int(pd.to_numeric(df_perf.loc[df_perf["perf_date"]==system_today,
+                            count_cols[n]].squeeze(),errors="coerce") or 0) \
+               if system_today in df_perf["perf_date"].values else 0
+        pct=attend/((df_perf["perf_date"]<=system_today).sum()) if df_perf.shape[0] else 0
+        timing=pd.to_numeric(df_perf[timing_cols[n]],errors="coerce").mean()
+    
+        records.append({"نام":n,
+            "امتیاز همان روز":st4[0]["final"], "امتیاز فردا":st4[1]["final"],
+            "امتیاز پسفردا":st4[2]["final"], "امتیاز ۳ روز بعد":st4[3]["final"],
+            "تعداد روزهای مشارکت":attend, "درصد مشارکت":pct,
+            "میانگین سرعت پیش‌بینی":timing})
+    perf=pd.DataFrame(records)
+    # # ----------  build performance summary (+ save stats)  ---------------
+    # records   = []
+    # all_stats = {}              # ← اضافه شد
+    
+    # for name in expert_cols:
+    #     stats = [horizon_stats(name, i) for i in range(4)]
+    #     all_stats[name] = stats          # ← ذخیره برای جدول تجمیعی
+    
+    #     attend = int(pd.to_numeric(
+    #         df_perf.loc[df_perf["perf_date"] == system_today, count_cols[name]].squeeze(),
+    #         errors="coerce") or 0) if system_today in df_perf["perf_date"].values else 0
+    #     pct    = attend / ((df_perf["perf_date"] <= system_today).sum()) if df_perf.shape[0] else 0
+    #     timing = pd.to_numeric(df_perf[timing_cols[name]], errors="coerce").mean()
+    
+    #     records.append({
+    #         "نام": name,
+    #         "امتیاز همان روز":   stats[0]["final"],
+    #         "امتیاز فردا":       stats[1]["final"],
+    #         "امتیاز پسفردا":     stats[2]["final"],
+    #         "امتیاز ۳ روز بعد":  stats[3]["final"],
+    #         "تعداد روزهای مشارکت": attend,
+    #         "درصد مشارکت":        pct,
+    #         "میانگین سرعت پیش‌بینی": timing
+    #     })
+    
+    # perf = pd.DataFrame(records)
+    # # ---------------------------------------------------------------------
+    # # 🔗 جدول جمع‌بندی چهار افق
+    # # ---------------------------------------------------------------------
+    # agg_rows = []
+    # for name, stat_list in all_stats.items():
+    #     agg_rows.append({
+    #         "کارشناس":           name,
+    #         "Override":          sum(s["override"] for s in stat_list),
+    #         "Correct":           sum(s["correct"]  for s in stat_list),
+    #         "Wrong":             sum(s["wrong"]    for s in stat_list),
+    #         "FuzzyErr(AVG)":     round(np.mean([s["fuzzy"] for s in stat_list]), 3),
+    #         "MSE(AVG)":          round(np.nanmean([s["mse"]  for s in stat_list]), 3),
+    #         "FinalScore(AVG)":   round(np.mean([s["final"] for s in stat_list]), 4)
+    #     })
+    
+    # agg_df = pd.DataFrame(agg_rows).sort_values("FinalScore(AVG)", ascending=False)
+    
+    # st.subheader("📋 جدول جمع‌بندی کل افق‌ها")
+    # st.dataframe(agg_df, use_container_width=True)
+    
+
+    # 8) composite overall score ------------------------------------------
+    norm=lambda s:(s-s.min())/(s.max()-s.min()+eps)
+    perf["_h0"],perf["_h1"],perf["_h2"],perf["_h3"] = [norm(perf[c]) for c in
+        ["امتیاز همان روز","امتیاز فردا","امتیاز پسفردا","امتیاز ۳ روز بعد"]]
+    perf["_p"]=norm(perf["درصد مشارکت"])
+    perf["رتبه سرعت پیش‌بینی"]=perf["میانگین سرعت پیش‌بینی"].rank(method="min")
+    perf["_r"]=norm(perf["رتبه سرعت پیش‌بینی"].max()-perf["رتبه سرعت پیش‌بینی"])
+    perf["امتیاز نهایی"]=0.2*(perf["_h0"]+perf["_h1"]+perf["_h2"]+perf["_h3"])+0.1*perf["_p"]+0.1*perf["_r"]
+    perf["درصد مشارکت"]=(perf["درصد مشارکت"]*100).round(1).astype(str)+"%"
+    
+    # --------------------- عملکرد شما -------------------------------------
+    if st.session_state.get("logged_user"):
+        me=perf.loc[perf["نام"]==st.session_state.logged_user].squeeze()
+        st.markdown(f"""
+        <div style="direction:rtl;font-family:Tahoma;background:#eef2f7;padding:16px;border-radius:8px;max-width:360px;margin:8px auto;">
+         <h4 style="text-align:center;margin-bottom:12px;color:#000">🌟 عملکرد شما</h4>
+         <div style="line-height:1.6;font-size:15px;color:#333;">
+          <div>📊 امتیاز همان روز: <strong>{me['امتیاز همان روز']:.2f}</strong></div>
+          <div>📊 امتیاز فردا: <strong>{me['امتیاز فردا']:.2f}</strong></div>
+          <div>📊 امتیاز پس‌فردا: <strong>{me['امتیاز پسفردا']:.2f}</strong></div>
+          <div>📊 امتیاز ۳ روز بعد: <strong>{me['امتیاز ۳ روز بعد']:.2f}</strong></div>
+          <hr style="margin:8px 0;border-color:#ccc;"/>
+          <div>📅 تعداد روزهای مشارکت: <strong>{me['تعداد روزهای مشارکت']}</strong></div>
+          <div>⏱️ رتبه سرعت: <strong>{int(me['رتبه سرعت پیش‌بینی'])}</strong></div>
+          <div>🏆 نمره کل: <strong>{round(me['امتیاز نهایی']*100)}%</strong></div>
+         </div></div>""",unsafe_allow_html=True)
+    
+    # --------------------- قهرمانان --------------------------------------
+    st.subheader("🏆 قهرمانان پیش‌بینی")
+    champ=lambda col:perf.loc[perf[col].idxmax(),"نام"]
+    h0,h1,h2,h3=[champ(c) for c in ["امتیاز همان روز","امتیاز فردا",
+                                    "امتیاز پسفردا","امتیاز ۳ روز بعد"]]
+    part_champ=champ("تعداد روزهای مشارکت")
+    speed_champ=perf.loc[perf["رتبه سرعت پیش‌بینی"].idxmin(),"نام"]
+    total_champ=champ("امتیاز نهایی")
+    st.markdown(f"""
+    <div style="direction:rtl;font-family:Tahoma;color:#2c3e50;background:#f0f4f8;border-radius:10px;padding:20px;max-width:400px;margin:0 auto;">
+     <h3 style="margin-bottom:16px;text-align:center;">🏆 برترین‌های پیش‌بینی تا امروز</h3>
+     <div style="line-height:1.8;font-size:16px;">
+      <div>🥇 بهترین امتیاز همان روز: {h0}</div>
+      <div>🥇 بهترین امتیاز فردا: {h1}</div>
+      <div>🥇 بهترین امتیاز پس‌فردا: {h2}</div>
+      <div>🥇 بهترین امتیاز ۳ روز بعد: {h3}</div>
+      <hr style="margin:16px 0;border-color:#d0d7de;"/>
+      <div>📊 قهرمان مشارکت: {part_champ}</div>
+      <div>⏱️ قهرمان سرعت: {speed_champ}</div>
+      <div>🏅 قهرمان کل: {total_champ}</div>
+     </div></div>""",unsafe_allow_html=True)
+    
+    # ---------------------------------------------------------------------
+    #                       🔐 ماژول تحلیل ادمین
+    # ---------------------------------------------------------------------
+    if "admin_unlocked" not in st.session_state: st.session_state["admin_unlocked"]=False
+    
+    def summary_df(h):
+        return pd.DataFrame([{"کارشناس":e,**horizon_stats(e,h)} for e in expert_cols])\
+               .sort_values("final",ascending=False)\
+               .rename(columns={"days":"تعداد روز","override":"Override","correct":"Correct",
+                                "wrong":"Wrong","fuzzy":"FuzzyErr","mse":"MSE","final":"FinalScore"})
+    
+    def detail_df(expert,h):
+        lag=h+1; colE,colS=expert_cols[expert][h],SYS_COLS[h]
+        s=df_pred[df_pred["pred_date"]+datetime.timedelta(days=lag)<=system_today].copy()
+        s["tgt"]=s["pred_date"]+pd.to_timedelta(h,unit="D")
+        s["actual"]=s["tgt"].map(actual_map)
+        s["exp"]=pd.to_numeric(s[colE],errors="coerce")
+        s["sys"]=pd.to_numeric(s[colS],errors="coerce")
+        s=s.dropna(subset=["actual","exp","sys"])
+        if s.empty: return pd.DataFrame()
+        c_act=s["actual"].map(colour_of); c_exp=s["exp"].map(colour_of); c_sys=s["sys"].map(colour_of)
+        m=c_exp!=c_sys; s=s[m].copy()
+        if s.empty: return pd.DataFrame()
+        s["رنگ کارشناس"]=c_exp[m].map(cname)
+        s["رنگ سیستم"]=c_sys[m].map(cname)
+        s["رنگ واقعی"]=c_act[m].map(cname)
+        s["درست؟"]=(abs(c_exp-c_act)<abs(c_sys-c_act)).map({True:"✅",False:"❌"})
+        return s.rename(columns={"pred_date":"تاریخ ثبت","tgt":"تاریخ هدف",
+                                 "exp":"پیش‌بینی کارشناس","sys":"پیش‌بینی سیستم",
+                                 "actual":"عدد واقعی"})[
+            ["تاریخ ثبت","تاریخ هدف","پیش‌بینی کارشناس","پیش‌بینی سیستم",
+             "عدد واقعی","رنگ کارشناس","رنگ سیستم","رنگ واقعی","درست؟"]]
+    
+    with st.expander("🛠️ جدول تحلیل ادمین (کلیک کنید)",
+                     expanded=st.session_state["admin_unlocked"]):
+    
+        # ---------- login -------------
+        if not st.session_state["admin_unlocked"]:
+            pw=st.text_input("رمز عبور:",type="password",key="adm_pw_input")
+            if st.button("تأیید",key="adm_login_btn"):
+                if pw=="1234":
+                    st.session_state["admin_unlocked"]=True
+                else:
+                    st.error("رمز نادرست است!")
+    
+        # ---------- admin content -----
+        if st.session_state["admin_unlocked"]:
+            if st.button("خروج",key="adm_logout_btn"):
+                st.session_state["admin_unlocked"]=False
+    
+            tabs=st.tabs(["امروز","فردا","۲ روز بعد","۳ روز بعد"])
+            for i,t in enumerate(tabs):
+                with t:
+                    st.dataframe(summary_df(i),use_container_width=True)
+    
+            st.markdown("---")
+            colH,colE,colB=st.columns([1,2,1])
+            mapH={"امروز":0,"فردا":1,"۲ روز بعد":2,"۳ روز بعد":3}
+            selH=colH.selectbox("افق:",list(mapH.keys()),key="adm_hor")
+            selE=colE.selectbox("کارشناس:",list(expert_cols.keys()),key="adm_exp")
+            if colB.button("نمایش",key="adm_show_detail"):
+                ddf=detail_df(selE,mapH[selH])
+                st.dataframe(ddf if not ddf.empty else pd.DataFrame({"پیام":["هیچ اوررایدی یافت نشد."]}),
+                             use_container_width=True)
+
+def main():
+        st.set_page_config(page_title="داشبورد پیش‌بینی", page_icon="📈", layout="wide")
+        main_page()
+    
+if __name__ == "__main__":
+        main()
