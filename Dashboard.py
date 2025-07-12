@@ -25,7 +25,7 @@ from urllib.parse import quote_plus
 # ---------------------------------------------------------------------------
 #   GLOBAL: GCP credentials
 # ---------------------------------------------------------------------------
-GCP_CRED_FILE = "extreme-lattice-452612-s1-2dbb968dbb10.json"   
+GCP_CRED_FILE = "extreme-lattice-452612-s1-87212a274f45.json"   
 
 def load_gcp_creds(scopes: list[str]):
     """Return a Credentials object from the local JSON-key file."""
